@@ -12,15 +12,16 @@ import numpy as np
 import os
 import glob
 import joblib
-from google.colab import drive
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 
 print("========== 🏆 啟動【LambdaRank 排序演算法】高階訓練系統 ==========")
 
 # 1. 掛載硬碟與設定路徑
-drive.mount('/content/drive', force_remount=False)
-os.chdir('/content/drive/MyDrive/HKJC_Model')
+
+# 直接抓取同一個資料夾底下的模型檔
+MODEL_PATH = 'my_hkjc_ranker.pkl'
+
 
 # 2. 自動搜尋所有歷史 CSV 檔案
 search_patterns = ["hkjc_data_*.csv", "hkjc_full_season_*.csv"]
