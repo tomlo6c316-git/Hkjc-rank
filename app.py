@@ -302,34 +302,75 @@ if uploaded_file is not None:
         else:
             st.dataframe(rec_df, use_container_width=True)
 
-    with tab2:
-        st.subheader("📊 排序模型 (Ranker) 策略回測結果")
+        with tab2:
+        st.subheader("📊 排序模型策略回測結果 (詳細賽果明細)")
+        
+        # 防呆檢查：確認有沒有真實名次
         if (df['numeric_rank'] == 99).all():
-            st.info("💡 目前資料無真實名次，無法計算 ROI。")
+            st.info("💡 目前上傳的資料沒有真實名次，無法計算 ROI。請上傳包含完賽名次的歷史資料檔來執行回測。")
         else:
-            total_invested, total_return, bet_count, win_count = 0, 0, 0, 0
-            BET_AMOUNT = 100
-
+            total_invested = 0
+            total_return = 0
+            bet_count = 0
+            win_count = 0
+            backtest_records = []
+            
+            BET_AMOUNT = 100  # 每場固定投注 100 元
+            
             for race_id, group in df.groupby('賽事編號'):
+                # 套用與預測相同的篩選條件
                 filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
                 sorted_group = filtered_group.sort_values(by='raw_score', ascending=False).reset_index(drop=True)
-
+                
+                # 如果這場有符合條件的馬，買進評分最高 (raw_score 最高) 的那一匹
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
                     bet_count += 1
                     total_invested += BET_AMOUNT
-                    if pick['numeric_rank'] == 1:
+                    
+                    # 檢查這匹馬實際名次是否為第 1 名
+                    is_win = (pick['numeric_rank'] == 1)
+                    
+                    if is_win:
                         win_count += 1
-                        total_return += BET_AMOUNT * pick['獨贏賠率']
-
+                        payout = BET_AMOUNT * pick['獨贏賠率']
+                        total_return += payout
+                        result_str = "✅ 命中 (贏)"
+                    else:
+                        payout = 0
+                        result_str = "❌ 未命中 (輸)"
+                        
+                    # 紀錄這一場的詳細表現
+                    backtest_records.append({
+                        '賽事編號': race_id,
+                        'AI 推薦馬號': f"馬號 {pick['馬號']} ({pick['馬名']})",
+                        '實際完賽名次': int(pick['numeric_rank']) if pick['numeric_rank'] != 99 else "未知",
+                        '獨贏賠率': pick['獨贏賠率'],
+                        '預測實力分': round(pick['raw_score'], 2),
+                        '投注結果': result_str,
+                        '派彩金額': f"${payout:.1f}",
+                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
+                    })
+            
             if bet_count > 0:
                 roi = ((total_return - total_invested) / total_invested) * 100
+                
+                # 頂部指標儀表板
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("投注場數", f"{bet_count} 場")
-                col2.metric("命中場數", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%")
-                col3.metric("總成本", f"${total_invested}")
-                col4.metric("總回收", f"${total_return:.1f}", f"ROI: {roi:.2f}%")
+                col1.metric("回測投注場數", f"{bet_count} 場")
+                col2.metric("實際命中場數", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%")
+                col3.metric("總投注成本", f"${total_invested}")
+                col4.metric("總回收金額", f"${total_return:.1f}", f"ROI: {roi:.2f}%")
+                
+                st.markdown("---")
+                st.markdown("#### 📝 每場賽事具體投注與命中明細")
+                
+                # 將明細轉成 DataFrame 並在畫面上完整呈現
+                res_df = pd.DataFrame(backtest_records)
+                st.dataframe(res_df, use_container_width=True)
+                
             else:
-                st.info("無符合投注條件的場次。")
+                st.info("💡 在目前的 EV 和賠率篩選條件下，沒有任何場次符合出手標準。")
+
 else:
     st.info("👈 請在左側上傳今日賽前排位表 CSV 以啟動預測！")
