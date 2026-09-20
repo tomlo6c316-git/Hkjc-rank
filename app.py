@@ -6,7 +6,7 @@ import joblib
 
 # 頁面基本設定
 st.set_page_config(page_title="HKJC LambdaRank 賽馬預測系統", page_icon="🏆", layout="wide")
-st.title("🏆 HKJC LambdaRank 智能排序系統 (整合凱利公式)")
+st.title("🏆 HKJC LambdaRank 智能排序系統 (凱利修正版)")
 st.markdown("---")
 
 MODEL_PATH = 'my_hkjc_ranker.pkl'
@@ -32,18 +32,12 @@ min_ev = st.sidebar.slider("最小期望值 (EV)", 0.0, 1.5, 0.0, 0.05)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=30.0)
 
-# ==========================================
-# 💰 新增：資金控管 (Bankroll Management)
-# ==========================================
 st.sidebar.markdown("---")
-st.sidebar.header("💰 凱利公式資金控管")
+st.sidebar.header("💰 資金與注碼控管")
+# 🌟 新增：讓使用者可以隨時比對平注與凱利的差異
+betting_mode = st.sidebar.radio("回測注碼模式", ["平注模式 (每場固定 $100)", "凱利公式 (動態注碼)"])
 bankroll = st.sidebar.number_input("目前總本金 (Bankroll)", min_value=1000, value=10000, step=1000)
-kelly_multiplier = st.sidebar.selectbox(
-    "凱利比例 (建議保守)", 
-    options=[0.1, 0.25, 0.5, 1.0], 
-    index=1, # 預設選 0.25 (1/4 凱利)
-    format_func=lambda x: f"{x*100}% 凱利 (1/{int(1/x)} Kelly)" if x != 1.0 else "100% 全凱利 (極度激進)"
-)
+kelly_multiplier = st.sidebar.selectbox("凱利比例 (建議保守)", [0.1, 0.25, 0.5, 1.0], index=1)
 
 if uploaded_file is not None:
     try:
@@ -53,8 +47,7 @@ if uploaded_file is not None:
         df_raw = pd.read_csv(uploaded_file, encoding='cp950')
         
     st.success("✅ 賽事資料載入成功！")
-    st.subheader("⚡ 快速輸入臨場賠率")
-    st.info("👇 點擊修改下方表格的『獨贏賠率』，AI 將即時計算最新勝率與【凱利建議注碼】！")
+    st.info("👇 修改下方表格的『獨贏賠率』，AI 將即時重新計算勝率與【凱利建議注碼】！")
     
     edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '獨贏賠率']
     df_editable = df_raw[edit_columns].copy()
@@ -107,7 +100,6 @@ if uploaded_file is not None:
         if col not in df.columns: df[col] = 0.0
     X_predict = df[feature_cols].fillna(0)
 
-    # 1. 取得 LambdaRank 分數並轉換為勝率
     df['raw_score'] = model.predict(X_predict)
     def softmax(x):
         e_x = np.exp(x - np.max(x))
@@ -115,105 +107,117 @@ if uploaded_file is not None:
     df['pred_win_prob'] = df.groupby('賽事編號')['raw_score'].transform(softmax)
     df['ev'] = df['pred_win_prob'] * df['獨贏賠率']
 
-    # ==========================================
-    # 🧠 凱利公式核心運算
-    # ==========================================
-    # 淨賠率 (Net Odds)
     df['net_odds'] = df['獨贏賠率'] - 1.0 
-    # 凱利比例 (Kelly Fraction) = p - (1-p)/b
     df['kelly_f'] = df['pred_win_prob'] - ((1.0 - df['pred_win_prob']) / df['net_odds'])
-    # 如果期望值為負，凱利公式會算出負數，這時強制設為 0 (不下注)
     df['kelly_f'] = df['kelly_f'].clip(lower=0)
-    
-    # 最終建議下注金額 = 總本金 * 凱利比例 * 激進度參數
-    # 四捨五入到十位數 (符合香港馬會最少 10 蚊一注的習慣)
-    df['suggested_bet'] = (bankroll * df['kelly_f'] * kelly_multiplier).round(-1)
 
     st.markdown("---")
-    tab1, tab2 = st.tabs(["🎯 預測推薦 & 凱利注碼", "📈 凱利動態回測 (ROI)"])
+    tab1, tab2 = st.tabs(["🎯 預測推薦 & 凱利注碼", "📈 歷史回測 (ROI)"])
 
     with tab1:
         st.subheader("🎯 AI 推薦與精算注碼")
         recommendations = []
         for race_id, group in df.groupby('賽事編號'):
-            filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds) & (group['suggested_bet'] > 0)]
+            # 🚨 修正核心：選馬時【絕對不看】凱利注碼，忠實還原 AI 的原始排名
+            filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
             sorted_group = filtered_group.sort_values(by='raw_score', ascending=False).reset_index(drop=True)
 
             if len(sorted_group) > 0:
                 top1 = sorted_group.iloc[0]
                 win_pick = f"馬號 {top1['馬號']} ({top1['馬名']})"
                 
+                base_bet = (bankroll * top1['kelly_f'] * kelly_multiplier)
+                suggested_bet = int(round(base_bet, -1))
+                bet_display = f"${suggested_bet}" if suggested_bet > 0 else "$0 (EV不足，建議觀望)"
+
                 recommendations.append({
                     '賽事編號': race_id,
-                    '🎯 首選獨贏': win_pick,
-                    '📊 相對勝率': f"{top1['pred_win_prob']*100:.1f}%",
-                    '💰 建議下注金額': f"${int(top1['suggested_bet'])}",
-                    '⚖️ 佔總本金比例': f"{(top1['suggested_bet']/bankroll)*100:.1f}%"
+                    '🎯 AI 首選': win_pick,
+                    '📊 實力分 (相對勝率)': f"{top1['raw_score']:.2f} ({top1['pred_win_prob']*100:.1f}%)",
+                    '💰 凱利建議注碼': bet_display
                 })
 
         rec_df = pd.DataFrame(recommendations)
         if rec_df.empty:
-            st.warning("⚠️ 沒有符合當前 EV 或賠率門檻的馬匹，凱利公式建議本場【袖手旁觀】。")
+            st.warning("⚠️ 沒有符合當前 EV 或賠率門檻的馬匹。")
         else:
             st.dataframe(rec_df, use_container_width=True)
 
     with tab2:
-        st.subheader("📊 凱利公式策略回測結果 (資金動態變化)")
+        st.subheader(f"📊 策略回測結果 ({betting_mode})")
         if (df['numeric_rank'] == 99).all():
             st.info("💡 目前上傳的資料沒有真實名次，無法執行回測。")
         else:
-            # 這裡回測改成動態本金計算
             current_bankroll = bankroll
+            total_invested = 0
+            total_return = 0
             bet_count = 0
             win_count = 0
             backtest_records = []
             
             for race_id, group in df.groupby('賽事編號'):
-                # 重新動態計算這場的注碼 (基於當下的本金)
-                group = group.copy()
-                group['dynamic_bet'] = (current_bankroll * group['kelly_f'] * kelly_multiplier).round(-1)
-                
-                filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds) & (group['dynamic_bet'] > 0)]
+                # 同樣，回測選馬時忠於 AI 原始排名
+                filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
                 sorted_group = filtered_group.sort_values(by='raw_score', ascending=False).reset_index(drop=True)
                 
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
-                    actual_bet = int(pick['dynamic_bet'])
+                    is_win = (pick['numeric_rank'] == 1)
                     
+                    if betting_mode == "平注模式 (每場固定 $100)":
+                        actual_bet = 100
+                    else:
+                        kelly_f = max(0, pick['pred_win_prob'] - ((1.0 - pick['pred_win_prob']) / pick['net_odds']))
+                        actual_bet = int(round(current_bankroll * kelly_f * kelly_multiplier, -1))
+                    
+                    # 只有實際注碼 > 0 才算一次真實出手
                     if actual_bet > 0:
                         bet_count += 1
-                        current_bankroll -= actual_bet  # 先扣除下注金
+                        total_invested += actual_bet
                         
-                        is_win = (pick['numeric_rank'] == 1)
                         if is_win:
                             win_count += 1
                             payout = actual_bet * pick['獨贏賠率']
-                            current_bankroll += payout  # 贏了就把派彩加回本金
                             result_str = "✅ 命中"
                         else:
                             payout = 0
                             result_str = "❌ 未命中"
                             
+                        current_bankroll = current_bankroll - actual_bet + payout
+                        total_return += payout
+                        
                         backtest_records.append({
                             '賽事編號': race_id,
-                            'AI 推薦馬號': f"馬號 {pick['馬號']} ({pick['馬名']})",
+                            'AI 首選馬號': f"{pick['馬號']} ({pick['馬名']})",
                             '賽前本金': f"${int(current_bankroll + actual_bet - payout)}",
                             '下注金額': f"${actual_bet}",
                             '獨贏賠率': pick['獨贏賠率'],
-                            '結果': result_str,
+                            '賽果': result_str,
+                            '賽後本金': f"${int(current_bankroll)}"
+                        })
+                    else:
+                        # 記錄凱利建議觀望的場次
+                        backtest_records.append({
+                            '賽事編號': race_id,
+                            'AI 首選馬號': f"{pick['馬號']} ({pick['馬名']})",
+                            '賽前本金': f"${int(current_bankroll)}",
+                            '下注金額': "觀望 ($0)",
+                            '獨贏賠率': pick['獨贏賠率'],
+                            '賽果': "✅ 命中" if is_win else "❌ 未命中",
                             '賽後本金': f"${int(current_bankroll)}"
                         })
             
-            if bet_count > 0:
-                roi = ((current_bankroll - bankroll) / bankroll) * 100
+            if len(backtest_records) > 0:
+                total_profit = current_bankroll - bankroll
+                roi_turnover = (total_profit / total_invested * 100) if total_invested > 0 else 0.0
                 
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("初始本金", f"${bankroll}")
-                col2.metric("命中率", f"{win_count}/{bet_count} ({win_count/bet_count*100:.1f}%)")
-                col3.metric("最終本金", f"${int(current_bankroll)}")
-                col4.metric("總盈虧 (ROI)", f"{current_bankroll - bankroll:.1f}", f"{roi:.2f}%")
+                col1.metric("實際下注場數", f"{bet_count} 場")
+                col2.metric("命中場數", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%" if bet_count > 0 else "0%")
+                col3.metric("總投注本金", f"${total_invested}")
+                col4.metric("淨盈虧", f"${total_profit:.1f}", f"ROI: {roi_turnover:.2f}%")
                 
                 st.markdown("---")
                 st.dataframe(pd.DataFrame(backtest_records), use_container_width=True)
             else:
-                st.info("💡 在目前的 EV 和賠率篩選條件下，沒有任何場次符合出手標準。")
+                st.info("💡 沒有任何場次符合出手標準。")
