@@ -302,8 +302,8 @@ if uploaded_file is not None:
         else:
             st.dataframe(rec_df, use_container_width=True)
 
-        with tab2:
-        st.subheader("📊 排序模型策略回測結果 (詳細賽果明細)")
+    with tab2:
+        st.subheader("📊 排序模型策略回測結果 (專業對帳單)")
         
         # 防呆檢查：確認有沒有真實名次
         if (df['numeric_rank'] == 99).all():
@@ -316,61 +316,94 @@ if uploaded_file is not None:
             backtest_records = []
             
             BET_AMOUNT = 100  # 每場固定投注 100 元
+            current_bankroll = 0  # 追蹤累積盈虧水位
             
             for race_id, group in df.groupby('賽事編號'):
-                # 套用與預測相同的篩選條件
                 filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
                 sorted_group = filtered_group.sort_values(by='raw_score', ascending=False).reset_index(drop=True)
                 
-                # 如果這場有符合條件的馬，買進評分最高 (raw_score 最高) 的那一匹
                 if len(sorted_group) > 0:
-                    pick = sorted_group.iloc[0]
+                    top1 = sorted_group.iloc[0]
                     bet_count += 1
                     total_invested += BET_AMOUNT
                     
-                    # 檢查這匹馬實際名次是否為第 1 名
-                    is_win = (pick['numeric_rank'] == 1)
-                    
+                    is_win = (top1['numeric_rank'] == 1)
                     if is_win:
                         win_count += 1
-                        payout = BET_AMOUNT * pick['獨贏賠率']
-                        total_return += payout
-                        result_str = "✅ 命中 (贏)"
+                        payout = BET_AMOUNT * top1['獨贏賠率']
+                        result_str = "✅ 命中"
                     else:
                         payout = 0
-                        result_str = "❌ 未命中 (輸)"
+                        result_str = "❌ 落空"
                         
-                    # 紀錄這一場的詳細表現
+                    net_profit = payout - BET_AMOUNT
+                    current_bankroll += net_profit
+                    total_return += payout
+                    
+                    # 抓取 AI 的次選與三選，觀察其真實完賽名次 (對玩 Q / QP 極具參考價值)
+                    top2_info = f"馬號 {sorted_group.iloc[1]['馬號']} (跑第 {int(sorted_group.iloc[1]['numeric_rank'])} 名)" if len(sorted_group) > 1 else "-"
+                    top3_info = f"馬號 {sorted_group.iloc[2]['馬號']} (跑第 {int(sorted_group.iloc[2]['numeric_rank'])} 名)" if len(sorted_group) > 2 else "-"
+                    
                     backtest_records.append({
                         '賽事編號': race_id,
-                        'AI 推薦馬號': f"馬號 {pick['馬號']} ({pick['馬名']})",
-                        '實際完賽名次': int(pick['numeric_rank']) if pick['numeric_rank'] != 99 else "未知",
-                        '獨贏賠率': pick['獨贏賠率'],
-                        '預測實力分': round(pick['raw_score'], 2),
-                        '投注結果': result_str,
-                        '派彩金額': f"${payout:.1f}",
-                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
+                        '🎯 首選馬 (獨贏)': f"馬號 {top1['馬號']} ({top1['馬名']})",
+                        '預測勝率': f"{top1['pred_win_prob']*100:.1f}%",
+                        '期望值 (EV)': top1['ev'],
+                        '賠率': top1['獨贏賠率'],
+                        '實際名次': int(top1['numeric_rank']) if top1['numeric_rank'] != 99 else "未知",
+                        '結果': result_str,
+                        '淨盈虧': net_profit,
+                        '累積盈虧': current_bankroll,
+                        '🥈 次選馬表現': top2_info,
+                        '🥉 三選馬表現': top3_info
                     })
             
             if bet_count > 0:
                 roi = ((total_return - total_invested) / total_invested) * 100
                 
-                # 頂部指標儀表板
+                # 1. 頂部指標儀表板
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("回測投注場數", f"{bet_count} 場")
-                col2.metric("實際命中場數", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%")
-                col3.metric("總投注成本", f"${total_invested}")
-                col4.metric("總回收金額", f"${total_return:.1f}", f"ROI: {roi:.2f}%")
+                col1.metric("投注場數", f"{bet_count} 場")
+                col2.metric("實際命中", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%")
+                col3.metric("總成本", f"${total_invested}")
+                col4.metric("總回收", f"${total_return:.1f}", f"ROI: {roi:.2f}%")
                 
                 st.markdown("---")
-                st.markdown("#### 📝 每場賽事具體投注與命中明細")
                 
-                # 將明細轉成 DataFrame 並在畫面上完整呈現
                 res_df = pd.DataFrame(backtest_records)
-                st.dataframe(res_df, use_container_width=True)
+                
+                # 2. 資金水位走勢圖 (Equity Curve)
+                st.markdown("#### 📈 累積盈虧走勢圖 (Bankroll Equity Curve)")
+                chart_data = res_df[['賽事編號', '累積盈虧']].set_index('賽事編號')
+                st.line_chart(chart_data)
+                
+                st.markdown("#### 📝 賽事詳細對帳單")
+                
+                # 3. 數據表上色邏輯 (贏錢標綠，輸錢標紅)
+                def color_result(val):
+                    if val == '✅ 命中': return 'color: #00FF00; font-weight: bold;'
+                    elif val == '❌ 落空': return 'color: #FF4B4B;'
+                    return ''
+                    
+                def color_profit(val):
+                    if isinstance(val, (int, float)):
+                        if val > 0: return 'color: #00FF00; font-weight: bold;'
+                        elif val < 0: return 'color: #FF4B4B;'
+                    return ''
+
+                # 套用顏色並格式化小數點與金錢符號
+                try:
+                    # Pandas 2.1.0 以上使用 map
+                    styled_df = res_df.style.map(color_result, subset=['結果']) \
+                                            .map(color_profit, subset=['淨盈虧', '累積盈虧']) \
+                                            .format({"期望值 (EV)": "{:.2f}", "賠率": "{:.1f}", "淨盈虧": "${:.1f}", "累積盈虧": "${:.1f}"})
+                except AttributeError:
+                    # 相容舊版 Pandas
+                    styled_df = res_df.style.applymap(color_result, subset=['結果']) \
+                                            .applymap(color_profit, subset=['淨盈虧', '累積盈虧']) \
+                                            .format({"期望值 (EV)": "{:.2f}", "賠率": "{:.1f}", "淨盈虧": "${:.1f}", "累積盈虧": "${:.1f}"})
+                
+                st.dataframe(styled_df, use_container_width=True)
                 
             else:
                 st.info("💡 在目前的 EV 和賠率篩選條件下，沒有任何場次符合出手標準。")
-
-else:
-    st.info("👈 請在左側上傳今日賽前排位表 CSV 以啟動預測！")
