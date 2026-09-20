@@ -5,8 +5,8 @@ import os
 import joblib
 
 # 頁面基本設定
-st.set_page_config(page_title="HKJC LambdaRank 賽馬預測系統", page_icon="🏆", layout="wide")
-st.title("🏆 HKJC LambdaRank 智能排序系統 (全玩法支援)")
+st.set_page_config(page_title="HKJC 賽馬智能實戰系統", page_icon="🏆", layout="wide")
+st.title("🏆 HKJC 賽馬智能實戰系統 (平注實戰版)")
 st.markdown("---")
 
 MODEL_PATH = 'my_hkjc_ranker.pkl'
@@ -27,24 +27,17 @@ st.sidebar.header("📂 資料載入")
 uploaded_file = st.sidebar.file_uploader("請上傳賽事資料 (CSV)", type=['csv'])
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 投注玩法與策略")
-# 🌟 新增：加入「連贏 (Q)」選項
+st.sidebar.header("🎯 投注玩法設定")
 bet_type = st.sidebar.radio(
-    "選擇回測玩法", 
+    "選擇回測與預測玩法", 
     ["獨贏 (Win)", "位置 (Place) - 估算", "連贏 (Q) - 估算", "位置Q (QP) - 估算"]
 )
 
-# 提示使用者
-if bet_type != "獨贏 (Win)":
-    st.sidebar.info("💡 因目前 CSV 只有獨贏賠率，位置、連贏與 QP 將強制使用 $100 平注進行勝率回測，派彩金額為系統經驗估算值。")
-    betting_mode = "平注模式 (每場固定 $100)"
-else:
-    betting_mode = st.sidebar.radio("注碼模式 (僅限獨贏)", ["平注模式 (每場固定 $100)", "凱利公式 (動態注碼)"])
+bet_amount = st.sidebar.number_input("每場固定下注金額 ($)", min_value=10, value=100, step=10)
+starting_bankroll = st.sidebar.number_input("初始資金庫 ($)", min_value=1000, value=10000, step=1000)
 
-bankroll = st.sidebar.number_input("目前總本金 (Bankroll)", min_value=1000, value=10000, step=1000)
-kelly_multiplier = st.sidebar.selectbox("凱利比例 (建議 0.25)", [0.1, 0.25, 0.5, 1.0], index=1)
-
-# 篩選條件
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ 篩選門檻")
 min_ev = st.sidebar.slider("最小期望值 (EV)", 0.0, 1.5, 0.0, 0.05)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=30.0)
@@ -118,15 +111,11 @@ if uploaded_file is not None:
     df['pred_win_prob'] = df.groupby('賽事編號')['raw_score'].transform(softmax)
     df['ev'] = df['pred_win_prob'] * df['獨贏賠率']
 
-    df['net_odds'] = df['獨贏賠率'] - 1.0 
-    df['kelly_f'] = df['pred_win_prob'] - ((1.0 - df['pred_win_prob']) / df['net_odds'])
-    df['kelly_f'] = df['kelly_f'].clip(lower=0)
-
     st.markdown("---")
-    tab1, tab2 = st.tabs(["🎯 預測推薦清單", "📈 歷史回測 (命中率與盈虧)"])
+    tab1, tab2 = st.tabs(["🎯 今日預測推薦", "📈 平注歷史回測"])
 
     with tab1:
-        st.subheader("🎯 AI 排序與策略推薦")
+        st.subheader("🎯 AI 排序與實戰推薦名單")
         recommendations = []
         for race_id, group in df.groupby('賽事編號'):
             filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
@@ -138,19 +127,13 @@ if uploaded_file is not None:
                 
                 win_pick = f"馬號 {top1['馬號']} ({top1['馬名']})"
                 q_qp_pick = f"{top1['馬號']} + {top2['馬號']}"
-                
-                if bet_type == "獨贏 (Win)":
-                    base_bet = (bankroll * top1['kelly_f'] * kelly_multiplier)
-                    suggested_bet = f"${int(round(base_bet, -1))}" if base_bet > 0 else "$0 (建議觀望)"
-                else:
-                    suggested_bet = "平注 $100"
 
                 recommendations.append({
                     '賽事編號': race_id,
                     '🎯 獨贏/位置首選': win_pick,
                     '🔗 連贏/位置Q (雙馬)': q_qp_pick,
                     '📊 首選勝率': f"{top1['pred_win_prob']*100:.1f}%",
-                    '💰 建議注碼': suggested_bet
+                    '💰 建議平注': f"${bet_amount}"
                 })
 
         rec_df = pd.DataFrame(recommendations)
@@ -160,11 +143,10 @@ if uploaded_file is not None:
             st.dataframe(rec_df, use_container_width=True)
 
     with tab2:
-        st.subheader(f"📊 {bet_type} 回測結果")
+        st.subheader(f"📊 {bet_type} 平注回測結果")
         if (df['numeric_rank'] == 99).all():
             st.info("💡 目前上傳的資料沒有真實名次，無法執行回測。")
         else:
-            current_bankroll = bankroll
             total_invested = 0
             total_return = 0
             bet_count = 0
@@ -179,31 +161,19 @@ if uploaded_file is not None:
                     pick = sorted_group.iloc[0]
                     is_win = (pick['numeric_rank'] == 1)
                     odds = pick['獨贏賠率']
-                    
-                    if betting_mode == "平注模式 (每場固定 $100)":
-                        actual_bet = 100
-                    else:
-                        kelly_f = max(0, pick['pred_win_prob'] - ((1.0 - pick['pred_win_prob']) / pick['net_odds']))
-                        actual_bet = int(round(current_bankroll * kelly_f * kelly_multiplier, -1))
-                        
                     pick_str = f"{pick['馬號']}({pick['馬名']})"
                     
                 elif bet_type == "位置 (Place) - 估算" and len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
                     is_win = (pick['numeric_rank'] <= 3) 
                     odds = max(1.05, pick['獨贏賠率'] / 3.5 + 0.3)
-                    actual_bet = 100
                     pick_str = f"{pick['馬號']}({pick['馬名']})"
                     
-                # 🌟 新增：連贏 (Q) 的回測邏輯
                 elif bet_type == "連贏 (Q) - 估算" and len(sorted_group) >= 2:
                     pick1 = sorted_group.iloc[0]
                     pick2 = sorted_group.iloc[1]
-                    # 連贏條件：兩匹馬都必須在第 1 名或第 2 名
                     is_win = (pick1['numeric_rank'] <= 2) and (pick2['numeric_rank'] <= 2)
-                    # 粗略估算連贏賠率 (約為兩馬獨贏賠率相乘的 40%)
                     odds = max(3.0, (pick1['獨贏賠率'] * pick2['獨贏賠率']) * 0.4)
-                    actual_bet = 100
                     pick_str = f"{pick1['馬號']} + {pick2['馬號']}"
                     
                 elif bet_type == "位置Q (QP) - 估算" and len(sorted_group) >= 2:
@@ -211,45 +181,41 @@ if uploaded_file is not None:
                     pick2 = sorted_group.iloc[1]
                     is_win = (pick1['numeric_rank'] <= 3) and (pick2['numeric_rank'] <= 3)
                     odds = max(2.0, (pick1['獨贏賠率'] + pick2['獨贏賠率']) / 2.5)
-                    actual_bet = 100
                     pick_str = f"{pick1['馬號']} + {pick2['馬號']}"
                 else:
-                    actual_bet = 0
+                    continue
                 
-                # 只有實際注碼 > 0 且有挑選出馬匹才算一次真實出手
-                if actual_bet > 0:
-                    bet_count += 1
-                    total_invested += actual_bet
-                    
-                    if is_win:
-                        win_count += 1
-                        payout = actual_bet * odds
-                        result_str = "✅ 命中"
-                    else:
-                        payout = 0
-                        result_str = "❌ 未命中"
-                        
-                    current_bankroll = current_bankroll - actual_bet + payout
+                bet_count += 1
+                total_invested += bet_amount
+                
+                if is_win:
+                    win_count += 1
+                    payout = bet_amount * odds
                     total_return += payout
+                    result_str = "✅ 命中"
+                else:
+                    payout = 0
+                    result_str = "❌ 未命中"
                     
-                    backtest_records.append({
-                        '賽事編號': race_id,
-                        'AI 選擇': pick_str,
-                        '下注金額': f"${actual_bet}",
-                        '賠率 (獨贏或估算)': round(odds, 2),
-                        '賽果': result_str,
-                        '派彩金額': f"${payout:.1f}"
-                    })
+                backtest_records.append({
+                    '賽事編號': race_id,
+                    'AI 選擇': pick_str,
+                    '下注金額': f"${bet_amount}",
+                    '賠率': round(odds, 2),
+                    '賽果': result_str,
+                    '派彩金額': f"${payout:.1f}"
+                })
             
             if len(backtest_records) > 0:
                 total_profit = total_return - total_invested
-                roi_turnover = (total_profit / total_invested * 100) if total_invested > 0 else 0.0
+                roi = (total_profit / total_invested * 100) if total_invested > 0 else 0.0
+                final_bankroll = starting_bankroll + total_profit
                 
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("實際下注場數", f"{bet_count} 場")
+                col1, col2, col3, col4 = col5 = st.columns(4)
+                col1.metric("實際出手場數", f"{bet_count} 場")
                 col2.metric("命中場數", f"{win_count} 場", f"勝率: {win_count/bet_count*100:.1f}%")
-                col3.metric("總投注本金", f"${total_invested}")
-                col4.metric("淨盈虧", f"${total_profit:.1f}", f"ROI: {roi_turnover:.2f}%")
+                col3.metric("總盈虧", f"${total_profit:.1f}", f"ROI: {roi:.2f}%")
+                col4.metric("結算資金庫", f"${int(final_bankroll)}")
                 
                 st.markdown("---")
                 st.dataframe(pd.DataFrame(backtest_records), use_container_width=True)
