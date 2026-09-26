@@ -3,10 +3,13 @@ import pandas as pd
 import numpy as np
 import os
 import joblib
+import requests
+import re
+import time
 
 # 頁面基本設定
 st.set_page_config(page_title="HKJC 賽馬智能實戰系統", page_icon="🏆", layout="wide")
-st.title("🏆 HKJC 賽馬智能實戰系統 (平注實戰版)")
+st.title("🏆 HKJC 賽馬智能實戰系統 (平注實戰版 + 即時賠率)")
 st.markdown("---")
 
 MODEL_PATH = 'my_hkjc_ranker.pkl'
@@ -42,6 +45,28 @@ min_ev = st.sidebar.slider("最小期望值 (EV)", 0.0, 1.5, 0.0, 0.05)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=30.0)
 
+# ==========================================
+# 🌟 新增功能 1：抓取馬會即時賠率 API
+# ==========================================
+def fetch_live_odds(date_str, venue, race_no):
+    """攔截馬會即時賠率 JSON"""
+    url = f"https://bet.hkjc.com/racing/getJSON.aspx?type=winplaodds&date={date_str}&venue={venue}&raceno={race_no}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        # 萃取 獨贏=位置 結構
+        matches = re.findall(r'(\d+)=(\d+\.\d+|\d+)=(\d+\.\d+|\d+)', resp.text)
+        if matches:
+            odds_dict = {}
+            for m in matches:
+                horse = str(m[0])
+                win = float(m[1])
+                odds_dict[horse] = {'win': win} # 這個版本專注於獨贏賠率
+            return odds_dict
+    except:
+        pass
+    return None
+
 if uploaded_file is not None:
     try:
         df_raw = pd.read_csv(uploaded_file, encoding='utf-8-sig')
@@ -51,16 +76,60 @@ if uploaded_file is not None:
         
     st.success("✅ 賽事資料載入成功！")
     
-    edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '獨贏賠率']
-    df_editable = df_raw[edit_columns].copy()
+    # ==========================================
+    # 🌟 新增功能 2：使用 Session State 記憶 DataFrame
+    # ==========================================
+    if 'df_data_flat' not in st.session_state or st.session_state.get('uploaded_filename_flat') != uploaded_file.name:
+        st.session_state['df_data_flat'] = df_raw.copy()
+        st.session_state['uploaded_filename_flat'] = uploaded_file.name
+
+    st.markdown("---")
+    st.subheader("⚡ 臨場賠率更新中心")
     
-    st.info("👇 點擊修改下方表格的『獨贏賠率』，AI 將即時重新計算排序與勝率！")
+    col_v, col_d, col_r, col_b = st.columns([1.5, 2, 1.5, 3])
+    venue_input = col_v.selectbox("賽事場地", ["HV (跑馬地)", "ST (沙田)"])
+    venue_code = "HV" if "HV" in venue_input else "ST"
+    
+    # 自動偵測日期
+    sample_id = str(df_raw['賽事編號'].iloc[0])
+    auto_date = f"{sample_id[:4]}-{sample_id[4:6]}-{sample_id[6:8]}" if len(sample_id) >= 8 else "2026-09-23"
+    api_date = col_d.text_input("API 查詢日期", value=auto_date)
+    
+    # 偵測場次
+    races_available = sorted(list(set([int(str(x).split('-')[1]) for x in df_raw['賽事編號']])))
+    target_race = col_r.selectbox("更新場次", races_available)
+
+    if col_b.button("🔄 一鍵抓取最新賠率 (開跑前 1 分鐘使用)", use_container_width=True):
+        with st.spinner(f"正在連線馬會抓取第 {target_race} 場即時賠率..."):
+            live_odds = fetch_live_odds(api_date, venue_code, target_race)
+            
+            if live_odds:
+                df_temp = st.session_state['df_data_flat']
+                race_mask = df_temp['賽事編號'].str.endswith(f"-{target_race:02d}")
+                
+                for horse_no, odds in live_odds.items():
+                    horse_mask = race_mask & (df_temp['馬號'] == str(horse_no))
+                    df_temp.loc[horse_mask, '獨贏賠率'] = odds['win']
+                
+                st.session_state['df_data_flat'] = df_temp
+                st.success(f"✅ 第 {target_race} 場獨贏賠率更新成功！")
+                time.sleep(1)
+                st.rerun() 
+            else:
+                st.error("⚠️ 抓取失敗。可能是日期/場地錯誤，或馬會尚未開盤。")
+
+    # ==========================================
+    
+    edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '獨贏賠率']
+    df_editable = st.session_state['df_data_flat'][edit_columns].copy()
+    
+    st.info("👇 賠率已同步更新。你也可以點擊表格手動修改，AI 將即時重新計算排序與勝率！")
     edited_df = st.data_editor(
         df_editable, disabled=['賽事編號', '馬號', '馬名', '排位檔位'],
         use_container_width=True, hide_index=True
     )
     
-    df = df_raw.copy()
+    df = st.session_state['df_data_flat'].copy()
     df['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
     
     # 特徵工程
