@@ -55,7 +55,32 @@ model = load_model()
 if model is None:
     st.error(f"⚠️ 找不到 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
     st.stop()
-
+@st.cache_data
+def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
+    """從歷史大表中計算騎師、練馬師與馬匹的真實歷史勝率"""
+    if not os.path.exists(history_csv_path):
+        return None
+    
+    try:
+        # 讀取歷史資料
+        hist_df = pd.read_csv(history_csv_path, low_memory=False)
+        # 將名次轉換為數字，跑第 1 名的設為 1 (is_win)
+        hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
+        hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
+        
+        # 分別計算平均勝率 (勝出次數 / 出賽次數)
+        jockey_stats = hist_df.groupby('騎師')['is_win'].mean().rename('hist_jockey_win_rate').reset_index()
+        trainer_stats = hist_df.groupby('練馬師')['is_win'].mean().rename('hist_trainer_win_rate').reset_index()
+        # 馬匹建議用「馬名」比對，因為跨季的「馬號」會重複
+        horse_stats = hist_df.groupby('馬名')['is_win'].mean().rename('hist_horse_win_rate').reset_index()
+        
+        # 騎練合作勝率 (Combo)
+        combo_stats = hist_df.groupby(['騎師', '練馬師'])['is_win'].mean().rename('hist_combo_win_rate').reset_index()
+        
+        return jockey_stats, trainer_stats, horse_stats, combo_stats
+    except Exception as e:
+        st.error(f"載入歷史數據失敗：{e}")
+        return None
 # 根據所選日期從 HKJC 官方排位頁抓取賽卡
 def find_racecard_table(html_text):
     try:
