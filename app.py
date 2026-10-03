@@ -65,7 +65,7 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
         # 讀取歷史資料
         
         csv_path = Path(__file__).resolve().parent / 'hkjc_all_seasons_features.csv'
-        hist_df = pd.read_csv(csv_path, low_memory=False)名次轉換為數字，跑第 1 名的設為 1 (is_win)
+        hist_df = pd.read_csv(csv_path, low_memory=False)#名次轉換為數字，跑第 1 名的設為 1 (is_win)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
