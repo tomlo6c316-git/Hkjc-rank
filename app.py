@@ -592,11 +592,38 @@ else:
 rank_source = df['名次'] if '名次' in df.columns else pd.Series(99, index=df.index)
 df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
 
-df['jockey_win_rate'] = df.get('jockey_win_rate', 0.12)
-df['trainer_win_rate'] = df.get('trainer_win_rate', 0.12)
-df['combo_win_rate'] = df.get('combo_win_rate', 0.10)
-df['horse_win_rate'] = df.get('horse_win_rate', 0.10)
+# === 補全真實歷史數據 ===
+hist_stats = load_historical_stats()
+
+if hist_stats is not None:
+    jockey_stats, trainer_stats, horse_stats, combo_stats = hist_stats
+    
+    # 透過 Left Merge 把真實勝率貼入當日賽卡
+    df = df.merge(jockey_stats, on='騎師', how='left')
+    df = df.merge(trainer_stats, on='練馬師', how='left')
+    df = df.merge(horse_stats, on='馬名', how='left')
+    
+    # 這裡要注意，排位表的「騎師」和「練馬師」可能會有空白或特殊字元，merge 前確保格式一致
+    df = df.merge(combo_stats, on=['騎師', '練馬師'], how='left')
+    
+    # 覆蓋或建立模型需要的特徵欄位 (遇到新騎師/新馬沒有歷史紀錄時，才給予較低的保守預設值)
+    df['jockey_win_rate'] = df['hist_jockey_win_rate'].fillna(0.08)
+    df['trainer_win_rate'] = df['hist_trainer_win_rate'].fillna(0.08)
+    df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
+    df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
+    
+    # 用完後刪除暫存欄位保持整潔
+    df.drop(columns=['hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate'], inplace=True, errors='ignore')
+else:
+    # 退回安全預設值以免模型崩潰
+    df['jockey_win_rate'] = df.get('jockey_win_rate', 0.08)
+    df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
+    df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
+    df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
+
+# 上場名次因為比較難即時回溯，給個中庸值 6.0
 df['horse_last_rank'] = df.get('horse_last_rank', 6.0)
+# ==========================
 
 if '距離' not in df.columns: df['距離'] = 1200
 if 'horse_surface_win_rate' not in df.columns: df['horse_surface_win_rate'] = 0.08
