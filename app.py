@@ -593,36 +593,49 @@ rank_source = df['名次'] if '名次' in df.columns else pd.Series(99, index=df
 df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
 
 # === 補全真實歷史數據 ===
+# === 補全真實歷史數據 (強化清洗版) ===
 hist_stats = load_historical_stats()
 
 if hist_stats is not None:
     jockey_stats, trainer_stats, horse_stats, combo_stats = hist_stats
     
-    # 透過 Left Merge 把真實勝率貼入當日賽卡
-    df = df.merge(jockey_stats, on='騎師', how='left')
-    df = df.merge(trainer_stats, on='練馬師', how='left')
-    df = df.merge(horse_stats, on='馬名', how='left')
+    # 1. 建立用於比對的乾淨欄位 (清除空格與括號內的減磅標記)
+    df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
+    df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
+    df['_clean_horse'] = df['馬名'].astype(str).str.replace(' ', '')
     
-    # 這裡要注意，排位表的「騎師」和「練馬師」可能會有空白或特殊字元，merge 前確保格式一致
-    df = df.merge(combo_stats, on=['騎師', '練馬師'], how='left')
+    jockey_stats['_clean_jockey'] = jockey_stats['騎師'].astype(str).str.replace(' ', '')
+    trainer_stats['_clean_trainer'] = trainer_stats['練馬師'].astype(str).str.replace(' ', '')
+    horse_stats['_clean_horse'] = horse_stats['馬名'].astype(str).str.replace(' ', '')
     
-    # 覆蓋或建立模型需要的特徵欄位 (遇到新騎師/新馬沒有歷史紀錄時，才給予較低的保守預設值)
+    combo_stats['_clean_jockey'] = combo_stats['騎師'].astype(str).str.replace(' ', '')
+    combo_stats['_clean_trainer'] = combo_stats['練馬師'].astype(str).str.replace(' ', '')
+    
+    # 2. 透過乾淨的欄位進行 Merge
+    df = df.merge(jockey_stats[['_clean_jockey', 'hist_jockey_win_rate']], on='_clean_jockey', how='left')
+    df = df.merge(trainer_stats[['_clean_trainer', 'hist_trainer_win_rate']], on='_clean_trainer', how='left')
+    df = df.merge(horse_stats[['_clean_horse', 'hist_horse_win_rate']], on='_clean_horse', how='left')
+    df = df.merge(combo_stats[['_clean_jockey', '_clean_trainer', 'hist_combo_win_rate']], on=['_clean_jockey', '_clean_trainer'], how='left')
+    
+    # 3. 覆蓋特徵，找不到的給予保守預設值
     df['jockey_win_rate'] = df['hist_jockey_win_rate'].fillna(0.08)
     df['trainer_win_rate'] = df['hist_trainer_win_rate'].fillna(0.08)
     df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
     df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
     
-    # 用完後刪除暫存欄位保持整潔
-    df.drop(columns=['hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate'], inplace=True, errors='ignore')
+    # 4. 清理所有暫存欄位，保持資料表乾淨
+    df.drop(columns=['_clean_jockey', '_clean_trainer', '_clean_horse', 
+                     'hist_jockey_win_rate', 'hist_trainer_win_rate', 
+                     'hist_horse_win_rate', 'hist_combo_win_rate'], inplace=True, errors='ignore')
 else:
-    # 退回安全預設值以免模型崩潰
+    # 退回安全預設值
     df['jockey_win_rate'] = df.get('jockey_win_rate', 0.08)
     df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
     df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
     df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
 
-# 上場名次因為比較難即時回溯，給個中庸值 6.0
 df['horse_last_rank'] = df.get('horse_last_rank', 6.0)
+# ==========================
 # ==========================
 
 if '距離' not in df.columns: df['距離'] = 1200
