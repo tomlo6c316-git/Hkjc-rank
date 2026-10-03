@@ -595,6 +595,11 @@ df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
 # === 補全真實歷史數據 ===
 # === 補全真實歷史數據 (強化清洗版) ===
 hist_stats = load_historical_stats()
+if hist_stats is not None:
+    j_s, t_s, h_s, c_s = hist_stats
+    st.sidebar.success(f"✅ 歷史大表讀取成功！包含 {len(j_s)} 位騎師、{len(t_s)} 位練馬師歷史勝率。")
+else:
+    st.sidebar.error("❌ 未能讀取歷史大表，目前正在使用預設值！")
 
 if hist_stats is not None:
     jockey_stats, trainer_stats, horse_stats, combo_stats = hist_stats
