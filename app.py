@@ -298,11 +298,7 @@ elif selected_csv_path.is_file():
 else:
     st.error(f"找不到預測 CSV：{selected_csv_path.name}。")
     st.stop()
-    st.sidebar.success(f"已從 repo 載入預測卡：{SELECTED_CSV_PATH.name}（{len(df_raw)} 匹）")
-    st.success(f"✅ 已從 GitHub repo 載入預測賽事資料 ({SELECTED_CSV_PATH.name})！")
-else:
-    st.error(f"找不到預測 CSV：{SELECTED_CSV_PATH.name}。請確認檔案已上傳至 GitHub。")
-    st.stop()
+    
 
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
