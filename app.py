@@ -55,33 +55,29 @@ model = load_model()
 if model is None:
     st.error(f"⚠️ 找不到 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
     st.stop()
+
 @st.cache_data
 def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
     """從歷史大表中計算騎師、練馬師與馬匹的真實歷史勝率"""
-    if not os.path.exists(history_csv_path):
+    csv_path = Path(__file__).resolve().parent / history_csv_path
+    if not os.path.exists(csv_path):
         return None
     
     try:
-        # 讀取歷史資料
-        
-        csv_path = Path(__file__).resolve().parent / 'hkjc_all_seasons_features.csv'
-        hist_df = pd.read_csv(csv_path, low_memory=False)#名次轉換為數字，跑第 1 名的設為 1 (is_win)
+        hist_df = pd.read_csv(csv_path, low_memory=False)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
-        # 分別計算平均勝率 (勝出次數 / 出賽次數)
         jockey_stats = hist_df.groupby('騎師')['is_win'].mean().rename('hist_jockey_win_rate').reset_index()
         trainer_stats = hist_df.groupby('練馬師')['is_win'].mean().rename('hist_trainer_win_rate').reset_index()
-        # 馬匹建議用「馬名」比對，因為跨季的「馬號」會重複
         horse_stats = hist_df.groupby('馬名')['is_win'].mean().rename('hist_horse_win_rate').reset_index()
-        
-        # 騎練合作勝率 (Combo)
         combo_stats = hist_df.groupby(['騎師', '練馬師'])['is_win'].mean().rename('hist_combo_win_rate').reset_index()
         
         return jockey_stats, trainer_stats, horse_stats, combo_stats
     except Exception as e:
         st.error(f"載入歷史數據失敗：{e}")
         return None
+
 # 根據所選日期從 HKJC 官方排位頁抓取賽卡
 def find_racecard_table(html_text):
     try:
@@ -104,10 +100,8 @@ def find_racecard_table(html_text):
             return table
     return None
 
-
 def find_column(columns, keywords, fallback=None):
     return next((col for col in columns if any(word in str(col) for word in keywords)), fallback)
-
 
 def fetch_hkjc_racecard(race_date):
     date_text = race_date.strftime('%Y/%m/%d')
@@ -158,7 +152,7 @@ def fetch_hkjc_racecard(race_date):
         weight_col = find_column(columns, ('負磅', '磅'))
         jockey_col = find_column(columns, ('騎師',))
         trainer_col = find_column(columns, ('練馬師',))
-        draw_col = find_column(columns, ('檔位', '排位', '檔'))
+        draw_col = find_column(columns, ('檔位',))
         if not all((horse_no_col, horse_name_col, weight_col, jockey_col, trainer_col, draw_col)):
             continue
 
@@ -195,42 +189,35 @@ def fetch_hkjc_racecard(race_date):
     result = pd.DataFrame(rows)
     return result.drop_duplicates(['賽事編號', '馬號'], keep='last').reset_index(drop=True)
 
-
-# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 csv
 # ==========================================
-# 📂 預測資料 (支援多檔案切換與即時抓取)
+# 📂 預測資料 (支援多檔案即時切換與抓取)
 # ==========================================
-# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 prediction.csv
-# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 prediction.csv
 st.sidebar.header("📂 預測資料")
 
-# --- 1. 下拉選單切換 repo 內的 CSV ---
-available_csvs = list(APP_DIR.glob("prediction*.csv"))
-csv_options = [f.name for f in available_csvs]
+available_csvs = sorted([f.name for f in APP_DIR.glob("prediction*.csv")])
 
-if not csv_options:
+if not available_csvs:
     st.sidebar.caption("⚠️ 找不到任何 prediction*.csv 檔案。")
     selected_csv_name = "prediction.csv"
 else:
-    selected_csv_name = st.sidebar.selectbox("📜 選擇 Repo 內的預測賽卡", csv_options)
+    selected_csv_name = st.sidebar.selectbox(
+        "📜 選擇 Repo 內的預測賽卡", 
+        available_csvs,
+        key="repo_csv_selector"
+    )
 
-# 🚀 偵測選單切換，強制更新 UI 與資料表格
-if 'last_selected_csv' not in st.session_state:
-    st.session_state['last_selected_csv'] = selected_csv_name
-
-if st.session_state['last_selected_csv'] != selected_csv_name:
+# 偵測下拉選單是否被切換
+if st.session_state.get('active_csv_name') != selected_csv_name:
+    st.session_state['active_csv_name'] = selected_csv_name
     st.session_state.pop('fetched_prediction_df', None)
     st.session_state.pop('df_data', None)
-    st.session_state['prediction_signature'] = None 
-    # 改變 editor 版本號，強制右側表格重新整理
+    st.session_state.pop('prediction_signature', None)
     st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
-    st.session_state['last_selected_csv'] = selected_csv_name
 
-# 將選中的檔名存入 session 供後續讀取
-st.session_state['selected_csv_path'] = APP_DIR / selected_csv_name
+SELECTED_CSV_PATH = APP_DIR / selected_csv_name
 
-race_date_choice = st.sidebar.date_input('選擇賽事日期', value=datetime.now().date(), key='racecard_date_choice')
-if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=True):
+race_date_choice = st.sidebar.date_input('選擇賽事日期 (抓新排位用)', value=datetime.now().date(), key='racecard_date_choice')
+if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=True, key='fetch_racecard_button'):
     try:
         with st.spinner(f'正在抓取 HKJC {race_date_choice:%Y-%m-%d} 排位表…'):
             fetched_card = fetch_hkjc_racecard(race_date_choice)
@@ -243,7 +230,6 @@ if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=Tru
         st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
         st.session_state.pop('odds_last_status', None)
         st.session_state.pop('odds_last_error', None)
-        st.session_state.pop('last_selected_csv', None)
         st.sidebar.success(f'已載入 {len(fetched_card)} 匹馬。')
     except Exception as exc:
         st.sidebar.error(f'抓取排位失敗：{type(exc).__name__}: {exc}')
@@ -253,8 +239,16 @@ if current_fetched_card is not None:
     csv_bytes = current_fetched_card.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
     st.sidebar.download_button(
         '⬇️ 下載此排位為 prediction.csv', data=csv_bytes, file_name='prediction.csv',
-        mime='text/csv', use_container_width=True
+        mime='text/csv', use_container_width=True, key='download_prediction_csv'
     )
+    if st.sidebar.button('🔄 放棄抓取資料，改用上方選單 CSV', use_container_width=True):
+        st.session_state.pop('fetched_prediction_df', None)
+        st.session_state.pop('df_data', None)
+        st.session_state.pop('prediction_signature', None)
+        st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
+        st.rerun()
+else:
+    st.sidebar.caption(f"目前使用選單檔案：{selected_csv_name}")
 
 backtest_file = st.sidebar.file_uploader(
     "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
@@ -265,46 +259,12 @@ backtest_file = st.sidebar.file_uploader(
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略參數設定")
-min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 1.5, 0.0, 0.05)
+min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.1)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
-# 🔍 2. 依照所選的 CSV 檔案進行載入
-fetched_prediction_df = st.session_state.get('fetched_prediction_df')
-# 取得剛才在側邊選單決定的 CSV 路徑
-selected_csv_path = st.session_state.get('selected_csv_path', PREDICTION_CSV_PATH)
-
-if fetched_prediction_df is not None:
-    df_raw = fetched_prediction_df.copy()
-    fetched_date = st.session_state.get('fetched_prediction_date', race_date_choice)
-    source_label = f"HKJC {fetched_date:%Y-%m-%d} 官方排位抓取"
-    prediction_signature = st.session_state.get('fetched_prediction_signature', source_label)
-    st.sidebar.success(f'預測來源：{source_label}（{len(df_raw)} 匹）')
-    
-elif selected_csv_path.is_file():
-    try:
-        df_raw = pd.read_csv(selected_csv_path, encoding='utf-8-sig')
-    except UnicodeDecodeError:
-        df_raw = pd.read_csv(selected_csv_path, encoding='cp950')
-        
-    source_label = f"GitHub repo：{selected_csv_path.name}"
-    prediction_signature = f"{selected_csv_path.name}:{selected_csv_path.stat().st_mtime_ns}:{selected_csv_path.stat().st_size}"
-
-    if df_raw.empty:
-        st.error(f"預測 CSV 是空檔：{selected_csv_path.name}")
-        st.stop()
-        
-    st.sidebar.success(f"已從 repo 載入預測卡：{selected_csv_path.name}（{len(df_raw)} 匹）")
-    st.success(f"✅ 已從 GitHub Repo 載入預測賽事資料 ({selected_csv_path.name})！")
-else:
-    st.error(f"找不到預測 CSV：{selected_csv_path.name}。")
-    st.stop()
-    
 
 # ==========================================
-# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
-# ==========================================
-# ==========================================
-# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
+# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版)
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 歷史賽果 15 大特徵抓取器")
@@ -326,7 +286,7 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
     success_count = 0
     total_horses = 0
     
-    for race_no in range(1, 13): # 支援最多 12 場賽事
+    for race_no in range(1, 13):
         status_text.text(f"正在抓取第 {race_no} 場資料...")
         url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={date_str_tool}&RaceNo={race_no}"
         try:
@@ -348,7 +308,6 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
             target_df = None
             
             for t in tables:
-                # 1. 破解盃賽干擾：攤平雙層標題
                 if isinstance(t.columns, pd.MultiIndex):
                     t.columns = ['_'.join(map(str, col)) for col in t.columns]
                     
@@ -357,7 +316,6 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
                     check_str += "".join([str(c) for c in t.iloc[row_idx].values])
                     
                 if '名次' in check_str and '馬號' in check_str and '獨贏' in check_str:
-                    # 2. 尋找真正的欄位標題列
                     if not any('名次' in str(c) for c in t.columns):
                         for row_idx in range(min(5, len(t))):
                             row_str = "".join([str(c) for c in t.iloc[row_idx].values])
@@ -371,7 +329,6 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
             if target_df is not None and not target_df.empty:
                 cols = target_df.columns.astype(str)
                 
-                # 3. 🎯 動態模糊搜尋欄位 (修正檔位 Bug)
                 rank_col = next((col for col in cols if '名次' in col), None)
                 horse_no_col = next((col for col in cols if '馬號' in col or '編號' in col), None)
                 horse_name_col = next((col for col in cols if '馬名' in col), None)
@@ -561,14 +518,12 @@ def fetch_live_odds(date_str, venue):
                 )
                 for node in pool.get("oddsNodes") or []:
                     horse_no = normalize_horse_no(node.get("combString"))
-                    odds_value = str(node.get("oddsValue")).strip() # 轉成字串並去除空白
+                    odds_value = str(node.get("oddsValue")).strip()
                     
-                    # 排除 None, 空白, 以及 "SCR"
                     if horse_no and odds_value not in ("None", "", "SCR"):
                         try:
                             market[pool_type][horse_no] = float(odds_value)
                         except ValueError:
-                            # 如果馬會未來回傳其他非數字字串 (例如 "REF" 退款)，直接略過避免崩潰
                             pass
 
         if not odds_by_race:
@@ -580,28 +535,32 @@ def fetch_live_odds(date_str, venue):
     except (ValueError, TypeError, KeyError) as exc:
         return None, None, f"解析回應錯誤：{exc}"
 
+# ==========================================
+# 決定讀取哪一份賽卡資料
+# ==========================================
 fetched_prediction_df = st.session_state.get('fetched_prediction_df')
+
 if fetched_prediction_df is not None:
     df_raw = fetched_prediction_df.copy()
     fetched_date = st.session_state.get('fetched_prediction_date', race_date_choice)
     source_label = f"HKJC {fetched_date:%Y-%m-%d} 官方排位抓取"
     prediction_signature = st.session_state.get('fetched_prediction_signature', source_label)
     st.sidebar.success(f'預測來源：{source_label}（{len(df_raw)} 匹）')
-elif PREDICTION_CSV_PATH.is_file():
+elif SELECTED_CSV_PATH.is_file():
     try:
-        df_raw = pd.read_csv(PREDICTION_CSV_PATH, encoding='utf-8-sig')
+        df_raw = pd.read_csv(SELECTED_CSV_PATH, encoding='utf-8-sig')
     except UnicodeDecodeError:
-        df_raw = pd.read_csv(PREDICTION_CSV_PATH, encoding='cp950')
-    source_label = f"GitHub repo：{PREDICTION_CSV_PATH.name}"
-    prediction_signature = f"{PREDICTION_CSV_PATH.name}:{PREDICTION_CSV_PATH.stat().st_mtime_ns}:{PREDICTION_CSV_PATH.stat().st_size}"
+        df_raw = pd.read_csv(SELECTED_CSV_PATH, encoding='cp950')
+    source_label = f"GitHub repo：{SELECTED_CSV_PATH.name}"
+    prediction_signature = f"{SELECTED_CSV_PATH.name}:{SELECTED_CSV_PATH.stat().st_mtime_ns}:{SELECTED_CSV_PATH.stat().st_size}"
 
     if df_raw.empty:
-        st.error(f"預測 CSV 是空檔：{PREDICTION_CSV_PATH.name}")
+        st.error(f"預測 CSV 是空檔：{SELECTED_CSV_PATH.name}")
         st.stop()
-    st.sidebar.success(f"已從 repo 載入預測卡：{PREDICTION_CSV_PATH.name}（{len(df_raw)} 匹）")
-    st.success("✅ 已從 GitHub repo 載入預測賽事資料！")
+    st.sidebar.success(f"已從 repo 載入：{SELECTED_CSV_PATH.name}（{len(df_raw)} 匹）")
+    st.success(f"✅ 目前顯示預測賽事檔案：`{SELECTED_CSV_PATH.name}`（共 {len(df_raw)} 匹馬）")
 else:
-    st.error(f"找不到 repo 預測 CSV：{PREDICTION_CSV_PATH.name}。")
+    st.error(f"找不到 repo 預測 CSV：{SELECTED_CSV_PATH.name}。")
     st.stop()
 
 auto_odds_status = None
@@ -643,10 +602,11 @@ if '位置賠率' not in df_raw.columns:
     win_values = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
     df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
 
+# 🚀 關鍵修復：每次切換檔案時，將版本號 +1，而不是重置為 0！
 if 'df_data' not in st.session_state or st.session_state.get('prediction_signature') != prediction_signature:
     st.session_state['df_data'] = df_raw.copy()
     st.session_state['prediction_signature'] = prediction_signature
-    st.session_state['odds_editor_version'] = 0
+    st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
 
 # ==========================================
 # 互動式臨場賠率輸入面板
@@ -654,14 +614,19 @@ if 'df_data' not in st.session_state or st.session_state.get('prediction_signatu
 st.info("👇 以下是當前載入的賽事資料。你可以點擊表格進行手動微調，或透過下方的更新面板抓取即時賠率。")
 
 edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '獨贏賠率', '位置賠率']
+for c in edit_columns:
+    if c not in st.session_state['df_data'].columns:
+        st.session_state['df_data'][c] = ''
 df_editable = st.session_state['df_data'][edit_columns].copy()
 
+# 加上選單名稱與版本號作為唯一 key，確保切換檔案瞬間刷新表格
+editor_key = f"odds_editor_{selected_csv_name}_{st.session_state.get('odds_editor_version', 0)}"
 edited_df = st.data_editor(
     df_editable,
     disabled=['賽事編號', '馬號', '馬名', '排位檔位'], 
     use_container_width=True,
     hide_index=True,
-    key=f"odds_editor_{st.session_state.get('odds_editor_version', 0)}"
+    key=editor_key
 )
 
 df = st.session_state['df_data'].copy()
@@ -689,56 +654,53 @@ else:
 rank_source = df['名次'] if '名次' in df.columns else pd.Series(99, index=df.index)
 df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
 
-# === 補全真實歷史數據 ===
 # === 補全真實歷史數據 (強化清洗版) ===
 hist_stats = load_historical_stats()
 if hist_stats is not None:
-    j_s, t_s, h_s, c_s = hist_stats
-    st.sidebar.success(f"✅ 歷史大表讀取成功！包含 {len(j_s)} 位騎師、{len(t_s)} 位練馬師歷史勝率。")
-else:
-    st.sidebar.error("❌ 未能讀取歷史大表，目前正在使用預設值！")
-
-if hist_stats is not None:
     jockey_stats, trainer_stats, horse_stats, combo_stats = hist_stats
+    st.sidebar.success(f"✅ 歷史大表讀取成功！包含 {len(jockey_stats)} 位騎師、{len(trainer_stats)} 位練馬師歷史勝率。")
     
-    # 1. 建立用於比對的乾淨欄位 (清除空格與括號內的減磅標記)
     df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
     df['_clean_horse'] = df['馬名'].astype(str).str.replace(' ', '')
     
-    jockey_stats['_clean_jockey'] = jockey_stats['騎師'].astype(str).str.replace(' ', '')
+    jockey_stats = jockey_stats.copy()
+    trainer_stats = trainer_stats.copy()
+    horse_stats = horse_stats.copy()
+    combo_stats = combo_stats.copy()
+
+    jockey_stats['_clean_jockey'] = jockey_stats['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     trainer_stats['_clean_trainer'] = trainer_stats['練馬師'].astype(str).str.replace(' ', '')
     horse_stats['_clean_horse'] = horse_stats['馬名'].astype(str).str.replace(' ', '')
-    
-    combo_stats['_clean_jockey'] = combo_stats['騎師'].astype(str).str.replace(' ', '')
+    combo_stats['_clean_jockey'] = combo_stats['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     combo_stats['_clean_trainer'] = combo_stats['練馬師'].astype(str).str.replace(' ', '')
+
+    jockey_stats = jockey_stats.groupby('_clean_jockey', as_index=False)['hist_jockey_win_rate'].mean()
+    trainer_stats = trainer_stats.groupby('_clean_trainer', as_index=False)['hist_trainer_win_rate'].mean()
+    horse_stats = horse_stats.groupby('_clean_horse', as_index=False)['hist_horse_win_rate'].mean()
+    combo_stats = combo_stats.groupby(['_clean_jockey', '_clean_trainer'], as_index=False)['hist_combo_win_rate'].mean()
     
-    # 2. 透過乾淨的欄位進行 Merge
     df = df.merge(jockey_stats[['_clean_jockey', 'hist_jockey_win_rate']], on='_clean_jockey', how='left')
     df = df.merge(trainer_stats[['_clean_trainer', 'hist_trainer_win_rate']], on='_clean_trainer', how='left')
     df = df.merge(horse_stats[['_clean_horse', 'hist_horse_win_rate']], on='_clean_horse', how='left')
     df = df.merge(combo_stats[['_clean_jockey', '_clean_trainer', 'hist_combo_win_rate']], on=['_clean_jockey', '_clean_trainer'], how='left')
     
-    # 3. 覆蓋特徵，找不到的給予保守預設值
     df['jockey_win_rate'] = df['hist_jockey_win_rate'].fillna(0.08)
     df['trainer_win_rate'] = df['hist_trainer_win_rate'].fillna(0.08)
     df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
     df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
     
-    # 4. 清理所有暫存欄位，保持資料表乾淨
     df.drop(columns=['_clean_jockey', '_clean_trainer', '_clean_horse', 
                      'hist_jockey_win_rate', 'hist_trainer_win_rate', 
                      'hist_horse_win_rate', 'hist_combo_win_rate'], inplace=True, errors='ignore')
 else:
-    # 退回安全預設值
+    st.sidebar.error("❌ 未能讀取歷史大表，目前正在使用預設值！")
     df['jockey_win_rate'] = df.get('jockey_win_rate', 0.08)
     df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
     df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
     df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
 
 df['horse_last_rank'] = df.get('horse_last_rank', 6.0)
-# ==========================
-# ==========================
 
 if '距離' not in df.columns: df['距離'] = 1200
 if 'horse_surface_win_rate' not in df.columns: df['horse_surface_win_rate'] = 0.08
@@ -828,7 +790,7 @@ with tab1:
         auto_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
     else:
         auto_date = datetime.now().strftime("%Y-%m-%d")
-    api_date = col_d.text_input("API 查詢日期 (YYYY-MM-DD)", value=auto_date)
+    api_date = col_d.text_input("API 查詢日期 (YYYY-MM-DD)", value=auto_date, key=f"api_date_{prediction_signature}")
 
     race_series = df_raw['賽事編號'].map(extract_race_no)
     races_available = sorted(int(x) for x in race_series.dropna().unique())
@@ -950,14 +912,23 @@ with tab1:
         filtered_group = group[(group['ev'] >= min_ev) & (group['獨贏賠率'] >= min_odds) & (group['獨贏賠率'] <= max_odds)]
         sorted_group = filtered_group.sort_values(by='ev', ascending=False).reset_index(drop=True)
 
-        if len(sorted_group) >= 2:
+        if len(sorted_group) >= 1:
             top1 = sorted_group.iloc[0]
-            top2 = sorted_group.iloc[1]
-            top3 = sorted_group.iloc[2] if len(sorted_group) >= 3 else top2
-
             win_pick = f"馬號 {top1['馬號']} ({top1['馬名']}) [勝率:{top1['pred_win_prob']*100:.1f}%, EV:{top1['ev']:.2f}]"
-            q_pick = f"{top1['馬號']} + {top2['馬號']} ({top1['馬名']} / {top2['馬名']})"
-            qp_pick = f"{top1['馬號']} + {top2['馬號']} 或 {top1['馬號']} + {top3['馬號']}"
+            
+            if len(sorted_group) >= 2:
+                top2 = sorted_group.iloc[1]
+                q_pick = f"{top1['馬號']} + {top2['馬號']} ({top1['馬名']} / {top2['馬名']})"
+            else:
+                q_pick = "⚠️ 僅一匹達標 (不推薦 Q)"
+                
+            if len(sorted_group) >= 3:
+                top3 = sorted_group.iloc[2]
+                qp_pick = f"{top1['馬號']} + {top2['馬號']} 或 {top1['馬號']} + {top3['馬號']}"
+            elif len(sorted_group) == 2:
+                qp_pick = f"{top1['馬號']} + {top2['馬號']} (僅一注 QP)"
+            else:
+                qp_pick = "⚠️ 僅一匹達標 (不推薦 QP)"
 
             recommendations.append({
                 '賽事編號': race_id,
