@@ -196,9 +196,24 @@ def fetch_hkjc_racecard(race_date):
     return result.drop_duplicates(['賽事編號', '馬號'], keep='last').reset_index(drop=True)
 
 
-# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 prediction.csv
+# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 csv
 st.sidebar.header("📂 預測資料")
-race_date_choice = st.sidebar.date_input('選擇賽事日期', value=datetime.now().date(), key='racecard_date_choice')
+
+# 🔍 1. 自動搜尋資料夾內所有以 prediction 開頭的 CSV 檔
+available_csvs = list(APP_DIR.glob("prediction*.csv"))
+csv_options = [f.name for f in available_csvs]
+
+if not csv_options:
+    st.sidebar.caption("⚠️ 找不到任何 prediction*.csv 檔案。")
+    selected_csv_name = "prediction.csv" # 預設防呆
+else:
+    # 產生下拉選單讓使用者選擇
+    selected_csv_name = st.sidebar.selectbox("📜 選擇 Repo 內的預測賽卡", csv_options)
+    
+# 更新所選的檔案路徑
+SELECTED_CSV_PATH = APP_DIR / selected_csv_name
+
+race_date_choice = st.sidebar.date_input('選擇賽事日期 (用於抓取最新排位)', value=datetime.now().date(), key='racecard_date_choice')
 if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=True, key='fetch_racecard_button'):
     try:
         with st.spinner(f'正在抓取 HKJC {race_date_choice:%Y-%m-%d} 排位表…'):
@@ -220,11 +235,11 @@ current_fetched_card = st.session_state.get('fetched_prediction_df')
 if current_fetched_card is not None:
     csv_bytes = current_fetched_card.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
     st.sidebar.download_button(
-        '⬇️ 下載 prediction.csv', data=csv_bytes, file_name='prediction.csv',
+        '⬇️ 下載最新的 prediction.csv', data=csv_bytes, file_name='prediction.csv',
         mime='text/csv', use_container_width=True, key='download_prediction_csv'
     )
 else:
-    st.sidebar.caption(f"未抓取新賽卡時，預測資料由 repo 的 {PREDICTION_CSV_PATH.name} 載入。")
+    st.sidebar.caption(f"目前預測資料由 repo 的 {selected_csv_name} 載入。")
 
 backtest_file = st.sidebar.file_uploader(
     "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
@@ -232,13 +247,36 @@ backtest_file = st.sidebar.file_uploader(
     key='backtest_results_upload',
     help='上傳已完賽的結果檔案，用來進行各策略與模擬結算的覆盤。',
 )
-
 st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略參數設定")
 # 請確保這行最前面有 "min_ev = "，並且沒有多餘的縮排
 min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.05)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
+# 🔍 2. 依照所選的 CSV 檔案進行載入
+fetched_prediction_df = st.session_state.get('fetched_prediction_df')
+if fetched_prediction_df is not None:
+    df_raw = fetched_prediction_df.copy()
+    fetched_date = st.session_state.get('fetched_prediction_date', race_date_choice)
+    source_label = f"HKJC {fetched_date:%Y-%m-%d} 官方排位抓取"
+    prediction_signature = st.session_state.get('fetched_prediction_signature', source_label)
+    st.sidebar.success(f'預測來源：{source_label}（{len(df_raw)} 匹）')
+elif SELECTED_CSV_PATH.is_file():
+    try:
+        df_raw = pd.read_csv(SELECTED_CSV_PATH, encoding='utf-8-sig')
+    except UnicodeDecodeError:
+        df_raw = pd.read_csv(SELECTED_CSV_PATH, encoding='cp950')
+    source_label = f"GitHub repo：{SELECTED_CSV_PATH.name}"
+    prediction_signature = f"{SELECTED_CSV_PATH.name}:{SELECTED_CSV_PATH.stat().st_mtime_ns}:{SELECTED_CSV_PATH.stat().st_size}"
+
+    if df_raw.empty:
+        st.error(f"預測 CSV 是空檔：{SELECTED_CSV_PATH.name}")
+        st.stop()
+    st.sidebar.success(f"已從 repo 載入預測卡：{SELECTED_CSV_PATH.name}（{len(df_raw)} 匹）")
+    st.success(f"✅ 已從 GitHub repo 載入預測賽事資料 ({SELECTED_CSV_PATH.name})！")
+else:
+    st.error(f"找不到預測 CSV：{SELECTED_CSV_PATH.name}。請確認檔案已上傳至 GitHub。")
+    st.stop()
 
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
