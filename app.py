@@ -242,6 +242,9 @@ max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_valu
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
 # ==========================================
+# ==========================================
+# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (新增整合)
+# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 歷史賽果 15 大特徵抓取器")
 st.sidebar.caption("輸入指定賽事日期，自動抓取該日賽果並產出可供模型訓練的 CSV。")
@@ -260,7 +263,9 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
     status_text = st.sidebar.empty()
     
     success_count = 0
-    for race_no in range(1, 13):
+    total_horses = 0
+    
+    for race_no in range(1, 13): # 支援最多 12 場賽事
         status_text.text(f"正在抓取第 {race_no} 場資料...")
         url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={date_str_tool}&RaceNo={race_no}"
         try:
@@ -269,7 +274,8 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
             html_text = resp.text
             
             if "沒有相關資料" in html_text or "No information" in html_text:
-                break
+                progress_bar.progress(race_no / 12)
+                continue
 
             distance = 1200
             dist_match = re.search(r'(\d{4})\s*米', html_text)
@@ -279,53 +285,82 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
             
             tables = pd.read_html(StringIO(html_text))
             target_df = None
+            
             for t in tables:
+                # 1. 破解盃賽干擾：攤平雙層標題
+                if isinstance(t.columns, pd.MultiIndex):
+                    t.columns = ['_'.join(map(str, col)) for col in t.columns]
+                    
                 check_str = "".join([str(c) for c in t.columns])
-                if len(t) > 0:
-                    check_str += "".join([str(c) for c in t.iloc[0].values])
+                for row_idx in range(min(5, len(t))):
+                    check_str += "".join([str(c) for c in t.iloc[row_idx].values])
+                    
                 if '名次' in check_str and '馬號' in check_str and '獨贏' in check_str:
+                    # 2. 尋找真正的欄位標題列
                     if not any('名次' in str(c) for c in t.columns):
-                        t.columns = t.iloc[0]
-                        t = t.drop(0)
+                        for row_idx in range(min(5, len(t))):
+                            row_str = "".join([str(c) for c in t.iloc[row_idx].values])
+                            if '名次' in row_str and '馬號' in row_str:
+                                t.columns = [str(c) for c in t.iloc[row_idx]]
+                                t = t.drop(range(row_idx + 1)).reset_index(drop=True) 
+                                break
                     target_df = t
                     break
                     
             if target_df is not None and not target_df.empty:
                 cols = target_df.columns.astype(str)
-                odds_col = next((col for col in cols if '獨贏' in col), None)
-                weight_col = next((col for col in cols if '負磅' in col), None)
-                draw_col = next((col for col in cols if '檔位' in col or '排位' in col), None)
                 
-                for idx, row in target_df.iterrows():
-                    rank = str(row.get('名次', '')).strip()
-                    horse_no = str(row.get('馬號', '')).strip()
-                    
-                    if horse_no.isdigit():
-                        horse_name_raw = str(row.get('馬名', ''))
-                        horse_name = horse_name_raw.split('(')[0].strip() if pd.notna(horse_name_raw) else ""
-                        odds_val = row[odds_col] if odds_col and pd.notna(row[odds_col]) else 0.0
-                        actual_weight = str(row[weight_col]).strip() if weight_col and pd.notna(row[weight_col]) else '120'
-                        draw_pos = str(row[draw_col]).strip() if draw_col and pd.notna(row[draw_col]) else '7'
+                # 3. 🎯 動態模糊搜尋欄位 (修正檔位 Bug)
+                rank_col = next((col for col in cols if '名次' in col), None)
+                horse_no_col = next((col for col in cols if '馬號' in col or '編號' in col), None)
+                horse_name_col = next((col for col in cols if '馬名' in col), None)
+                jockey_col = next((col for col in cols if '騎師' in col), None)
+                trainer_col = next((col for col in cols if '練馬師' in col), None)
+                odds_col = next((col for col in cols if '獨贏' in col), None)
+                weight_col = next((col for col in cols if '負磅' in col or '實際負磅' in col), None)
+                draw_col = next((col for col in cols if '檔位' in col), None)
+                
+                if rank_col and horse_no_col:
+                    added_in_this_race = 0
+                    for idx, row in target_df.iterrows():
+                        rank = str(row.get(rank_col, '')).strip()
+                        horse_no = str(row.get(horse_no_col, '')).strip()
                         
-                        all_races_data_tool.append({
-                            '馬季': tool_season,
-                            '賽事編號': f"{date_for_id_tool}-{race_no:02d}",
-                            '名次': rank,
-                            '馬號': horse_no,
-                            '馬名': horse_name,
-                            '騎師': str(row.get('騎師', '')),
-                            '練馬師': str(row.get('練馬師', '')),
-                            '實際負磅': actual_weight,
-                            '排位檔位': draw_pos,
-                            '獨贏賠率': odds_val,
-                            '距離': distance,                
-                            '場地': surface_type,            
-                            'horse_surface_win_rate': 0.08,   
-                            'horse_dist_win_rate': 0.08
-                        })
-                success_count += 1
+                        if horse_no.endswith('.0'): horse_no = horse_no[:-2]
+                        
+                        if horse_no.isdigit():
+                            horse_name_raw = str(row.get(horse_name_col, ''))
+                            horse_name = horse_name_raw.split('(')[0].strip() if pd.notna(horse_name_raw) else ""
+                            
+                            odds_val = row[odds_col] if odds_col and pd.notna(row[odds_col]) else 0.0
+                            actual_weight = str(row[weight_col]).strip() if weight_col and pd.notna(row[weight_col]) else '120'
+                            draw_pos = str(row[draw_col]).strip() if draw_col and pd.notna(row[draw_col]) else '7'
+                            
+                            all_races_data_tool.append({
+                                '馬季': tool_season,
+                                '賽事編號': f"{date_for_id_tool}-{race_no:02d}",
+                                '名次': rank,
+                                '馬號': horse_no,
+                                '馬名': horse_name,
+                                '騎師': str(row.get(jockey_col, '')).strip(),
+                                '練馬師': str(row.get(trainer_col, '')).strip(),
+                                '實際負磅': actual_weight,
+                                '排位檔位': draw_pos,
+                                '獨贏賠率': odds_val,
+                                '距離': distance,                
+                                '場地': surface_type,            
+                                'horse_surface_win_rate': 0.08,   
+                                'horse_dist_win_rate': 0.08
+                            })
+                            added_in_this_race += 1
+                    
+                    if added_in_this_race > 0:
+                        success_count += 1
+                        total_horses += added_in_this_race
+            
             progress_bar.progress(race_no / 12)
             time.sleep(1.0)
+            
         except Exception as e:
             continue
             
@@ -333,7 +368,7 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
     status_text.empty()
     
     if not all_races_data_tool:
-        st.sidebar.error("❌ 該日期找不到任何賽事資料，請確認日期是否正確或當日是否有賽事。")
+        st.sidebar.error("❌ 該日期找不到任何賽事資料，或賽事已取消。")
     else:
         df_tool = pd.DataFrame(all_races_data_tool)
         df_tool['獨贏賠率'] = pd.to_numeric(df_tool['獨贏賠率'], errors='coerce').fillna(0.0)
@@ -344,7 +379,7 @@ if st.sidebar.button("📥 抓取並產出訓練 CSV", use_container_width=True,
         csv_filename = f"hkjc_data_15features_{date_for_id_tool}.csv"
         csv_data = df_tool.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         
-        st.sidebar.success(f"🎉 成功抓取 {success_count} 場，共 {len(df_tool)} 筆資料！")
+        st.sidebar.success(f"🎉 成功抓取 {success_count} 場，共 {total_horses} 匹真實賽果資料！")
         st.sidebar.download_button(
             label="⬇️ 下載產出的訓練 CSV 檔",
             data=csv_data,
