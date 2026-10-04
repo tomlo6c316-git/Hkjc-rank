@@ -288,7 +288,8 @@ elif SELECTED_CSV_PATH.is_file():
     st.success(f"✅ 已載入 GitHub Repo 預測資料：{SELECTED_CSV_PATH.name}")
 else:
     st.error(f"找不到預測 CSV：{SELECTED_CSV_PATH.name}。請確認檔案已上傳至 GitHub。")
-    st.stop()backtest_file = st.sidebar.file_uploader(
+    st.stop()
+    backtest_file = st.sidebar.file_uploader(
     "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
     type=['csv'],
     key='backtest_results_upload',
