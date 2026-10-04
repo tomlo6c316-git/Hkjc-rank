@@ -201,6 +201,7 @@ def fetch_hkjc_racecard(race_date):
 # 📂 預測資料 (支援多檔案切換與即時抓取)
 # ==========================================
 # 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 prediction.csv
+# 預測賽卡可一鍵從 HKJC 抓取，或沿用 GitHub repo 的 prediction.csv
 st.sidebar.header("📂 預測資料")
 
 # --- 1. 下拉選單切換 repo 內的 CSV ---
@@ -255,7 +256,6 @@ if current_fetched_card is not None:
         mime='text/csv', use_container_width=True
     )
 
-# ⚠️ 補回遺失的回測檔案上傳區塊 (解決 NameError)
 backtest_file = st.sidebar.file_uploader(
     "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
     type=['csv'],
