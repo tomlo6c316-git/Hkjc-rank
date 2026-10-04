@@ -235,7 +235,8 @@ backtest_file = st.sidebar.file_uploader(
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略參數設定")
-mmin_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.05)
+# 請確保這行最前面有 "min_ev = "，並且沒有多餘的縮排
+min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.05)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
 
