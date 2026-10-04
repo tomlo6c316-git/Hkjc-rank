@@ -200,15 +200,12 @@ def fetch_hkjc_racecard(race_date):
 # ==========================================
 # 📂 預測資料 (支援多檔案切換與即時抓取)
 # ==========================================
+
 st.sidebar.header("📂 預測資料")
 
 # --- 1. 下拉選單切換 repo 內的 CSV ---
 available_csvs = list(APP_DIR.glob("prediction*.csv"))
 csv_options = [f.name for f in available_csvs]
-
-def on_csv_change():
-    # 當下拉選單切換檔案時，強制清除「手動抓取」的記憶，讓系統讀取新的 CSV
-    st.session_state.pop('fetched_prediction_df', None)
 
 if not csv_options:
     st.sidebar.caption("⚠️ 找不到任何 prediction*.csv 檔案。")
@@ -217,8 +214,19 @@ else:
     selected_csv_name = st.sidebar.selectbox(
         "📜 選擇 Repo 內的預測賽卡", 
         csv_options,
-        on_change=on_csv_change  # 👈 綁定清除記憶體的動作
+        key="csv_selector"
     )
+
+# 🚀 核心修復：暴力清除舊記憶
+if 'last_selected_csv' not in st.session_state:
+    st.session_state['last_selected_csv'] = selected_csv_name
+
+# 只要偵測到你切換了選單，立刻砍掉所有暫存！
+if st.session_state['last_selected_csv'] != selected_csv_name:
+    st.session_state.pop('fetched_prediction_df', None)
+    st.session_state.pop('df_data', None)
+    st.session_state.pop('prediction_signature', None)
+    st.session_state['last_selected_csv'] = selected_csv_name
 
 SELECTED_CSV_PATH = APP_DIR / selected_csv_name
 
@@ -237,6 +245,10 @@ if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=Tru
         st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
         st.session_state.pop('odds_last_status', None)
         st.session_state.pop('odds_last_error', None)
+        
+        # 為了避免與選單衝突，按下抓取按鈕時也清除選單記憶
+        st.session_state.pop('last_selected_csv', None)
+        
         st.sidebar.success(f'已載入 {len(fetched_card)} 匹馬。')
     except Exception as exc:
         st.sidebar.error(f'抓取排位失敗：{type(exc).__name__}: {exc}')
@@ -276,8 +288,7 @@ elif SELECTED_CSV_PATH.is_file():
     st.success(f"✅ 已載入 GitHub Repo 預測資料：{SELECTED_CSV_PATH.name}")
 else:
     st.error(f"找不到預測 CSV：{SELECTED_CSV_PATH.name}。請確認檔案已上傳至 GitHub。")
-    st.stop()
-backtest_file = st.sidebar.file_uploader(
+    st.stop()backtest_file = st.sidebar.file_uploader(
     "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
     type=['csv'],
     key='backtest_results_upload',
