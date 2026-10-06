@@ -23,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援單場凍結與落飛追蹤)")
+st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (15特徵全開 + 單場凍結與落飛追蹤)")
 st.markdown("---")
 
 # 初始化模擬投注紀錄與單場凍結名單
@@ -60,7 +60,7 @@ if model is None:
 
 @st.cache_data
 def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
-    """從歷史大表中計算騎師、練馬師與馬匹的真實歷史勝率"""
+    """從歷史大表中計算騎師、練馬師、馬匹勝率，以及馬匹上仗名次、場地勝率、路程勝率"""
     csv_path = Path(__file__).resolve().parent / history_csv_path
     if not os.path.exists(csv_path):
         return None
@@ -70,12 +70,53 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
-        jockey_stats = hist_df.groupby('騎師')['is_win'].mean().rename('hist_jockey_win_rate').reset_index()
-        trainer_stats = hist_df.groupby('練馬師')['is_win'].mean().rename('hist_trainer_win_rate').reset_index()
-        horse_stats = hist_df.groupby('馬名')['is_win'].mean().rename('hist_horse_win_rate').reset_index()
-        combo_stats = hist_df.groupby(['騎師', '練馬師'])['is_win'].mean().rename('hist_combo_win_rate').reset_index()
+        # 預先清洗歷史大表的名稱欄位，確保比對精準
+        hist_df['_clean_jockey'] = hist_df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
+        hist_df['_clean_trainer'] = hist_df['練馬師'].astype(str).str.replace(' ', '')
+        hist_df['_clean_horse'] = hist_df['馬名'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
         
-        return jockey_stats, trainer_stats, horse_stats, combo_stats
+        # 1. 基本騎師、練馬師、馬匹、騎練合作勝率
+        jockey_stats = hist_df.groupby('_clean_jockey', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_jockey_win_rate'})
+        trainer_stats = hist_df.groupby('_clean_trainer', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_trainer_win_rate'})
+        horse_stats = hist_df.groupby('_clean_horse', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_horse_win_rate'})
+        combo_stats = hist_df.groupby(['_clean_jockey', '_clean_trainer'], as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_combo_win_rate'})
+        
+        # 2. 馬匹「上仗名次 (horse_last_rank)」：依賽事編號排序，取每匹馬最後一場有效名次
+        valid_ranks_df = hist_df.dropna(subset=['numeric_rank']).copy()
+        if '賽事編號' in valid_ranks_df.columns:
+            valid_ranks_df = valid_ranks_df.sort_values('賽事編號')
+        horse_last_rank_stats = (
+            valid_ranks_df.groupby('_clean_horse', as_index=False)
+            .last()[['_clean_horse', 'numeric_rank']]
+            .rename(columns={'numeric_rank': 'hist_horse_last_rank'})
+        )
+        
+        # 3. 馬匹「場地勝率 (horse_surface_win_rate)」
+        if '場地' in hist_df.columns:
+            hist_df['_clean_surface'] = hist_df['場地'].astype(str).str.strip()
+            horse_surface_stats = (
+                hist_df.groupby(['_clean_horse', '_clean_surface'], as_index=False)['is_win']
+                .mean()
+                .rename(columns={'is_win': 'hist_horse_surface_win_rate'})
+            )
+        else:
+            horse_surface_stats = pd.DataFrame(columns=['_clean_horse', '_clean_surface', 'hist_horse_surface_win_rate'])
+            
+        # 4. 馬匹「路程勝率 (horse_dist_win_rate)」
+        if '距離' in hist_df.columns:
+            hist_df['_clean_dist'] = pd.to_numeric(hist_df['距離'], errors='coerce').fillna(1200).astype(int)
+            horse_dist_stats = (
+                hist_df.groupby(['_clean_horse', '_clean_dist'], as_index=False)['is_win']
+                .mean()
+                .rename(columns={'is_win': 'hist_horse_dist_win_rate'})
+            )
+        else:
+            horse_dist_stats = pd.DataFrame(columns=['_clean_horse', '_clean_dist', 'hist_horse_dist_win_rate'])
+            
+        return (
+            jockey_stats, trainer_stats, horse_stats, combo_stats,
+            horse_last_rank_stats, horse_surface_stats, horse_dist_stats
+        )
     except Exception as e:
         st.error(f"載入歷史數據失敗：{e}")
         return None
@@ -718,57 +759,64 @@ else:
 rank_source = df['名次'] if '名次' in df.columns else pd.Series(99, index=df.index)
 df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
 
-# === 補全真實歷史數據 (強化清洗版) ===
+if '距離' not in df.columns:
+    df['距離'] = 1200
+df['距離'] = pd.to_numeric(df['距離'], errors='coerce').fillna(1200).astype(int)
+
+if '場地' not in df.columns:
+    df['場地'] = '草地'
+
+# === 補全真實歷史數據 (15 大特徵完全接通版) ===
 hist_stats = load_historical_stats()
 if hist_stats is not None:
-    jockey_stats, trainer_stats, horse_stats, combo_stats = hist_stats
-    st.sidebar.success(f"✅ 歷史大表讀取成功！包含 {len(jockey_stats)} 位騎師、{len(trainer_stats)} 位練馬師歷史勝率。")
+    (
+        jockey_stats, trainer_stats, horse_stats, combo_stats,
+        horse_last_rank_stats, horse_surface_stats, horse_dist_stats
+    ) = hist_stats
+    st.sidebar.success(f"✅ 歷史大表 15 特徵全開！已載入 {len(horse_stats)} 匹馬完整生涯、近況與路程數據。")
     
     df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
-    df['_clean_horse'] = df['馬名'].astype(str).str.replace(' ', '')
+    df['_clean_horse'] = df['馬名'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
+    df['_clean_surface'] = df['場地'].astype(str).str.strip()
+    df['_clean_dist'] = df['距離'].astype(int)
     
-    jockey_stats = jockey_stats.copy()
-    trainer_stats = trainer_stats.copy()
-    horse_stats = horse_stats.copy()
-    combo_stats = combo_stats.copy()
-
-    jockey_stats['_clean_jockey'] = jockey_stats['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
-    trainer_stats['_clean_trainer'] = trainer_stats['練馬師'].astype(str).str.replace(' ', '')
-    horse_stats['_clean_horse'] = horse_stats['馬名'].astype(str).str.replace(' ', '')
-    combo_stats['_clean_jockey'] = combo_stats['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
-    combo_stats['_clean_trainer'] = combo_stats['練馬師'].astype(str).str.replace(' ', '')
-
-    jockey_stats = jockey_stats.groupby('_clean_jockey', as_index=False)['hist_jockey_win_rate'].mean()
-    trainer_stats = trainer_stats.groupby('_clean_trainer', as_index=False)['hist_trainer_win_rate'].mean()
-    horse_stats = horse_stats.groupby('_clean_horse', as_index=False)['hist_horse_win_rate'].mean()
-    combo_stats = combo_stats.groupby(['_clean_jockey', '_clean_trainer'], as_index=False)['hist_combo_win_rate'].mean()
+    # 對齊騎練與馬匹基本勝率
+    df = df.merge(jockey_stats, on='_clean_jockey', how='left')
+    df = df.merge(trainer_stats, on='_clean_trainer', how='left')
+    df = df.merge(horse_stats, on='_clean_horse', how='left')
+    df = df.merge(combo_stats, on=['_clean_jockey', '_clean_trainer'], how='left')
     
-    df = df.merge(jockey_stats[['_clean_jockey', 'hist_jockey_win_rate']], on='_clean_jockey', how='left')
-    df = df.merge(trainer_stats[['_clean_trainer', 'hist_trainer_win_rate']], on='_clean_trainer', how='left')
-    df = df.merge(horse_stats[['_clean_horse', 'hist_horse_win_rate']], on='_clean_horse', how='left')
-    df = df.merge(combo_stats[['_clean_jockey', '_clean_trainer', 'hist_combo_win_rate']], on=['_clean_jockey', '_clean_trainer'], how='left')
+    # 對齊馬匹上仗名次、場地勝率、同程勝率
+    df = df.merge(horse_last_rank_stats, on='_clean_horse', how='left')
+    df = df.merge(horse_surface_stats, on=['_clean_horse', '_clean_surface'], how='left')
+    df = df.merge(horse_dist_stats, on=['_clean_horse', '_clean_dist'], how='left')
     
     df['jockey_win_rate'] = df['hist_jockey_win_rate'].fillna(0.08)
     df['trainer_win_rate'] = df['hist_trainer_win_rate'].fillna(0.08)
     df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
     df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
     
-    df.drop(columns=['_clean_jockey', '_clean_trainer', '_clean_horse', 
-                     'hist_jockey_win_rate', 'hist_trainer_win_rate', 
-                     'hist_horse_win_rate', 'hist_combo_win_rate'], inplace=True, errors='ignore')
+    # 上仗名次：若為初出新馬無紀錄，預設給予中間名次 6.5
+    df['horse_last_rank'] = df['hist_horse_last_rank'].fillna(6.5)
+    # 場地與路程勝率：若該馬首次跑該場地/路程，退回使用該馬自身的總勝率 (horse_win_rate)，再無則給 0.06
+    df['horse_surface_win_rate'] = df['hist_horse_surface_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    df['horse_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    
+    df.drop(columns=[
+        '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
+        'hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate',
+        'hist_horse_last_rank', 'hist_horse_surface_win_rate', 'hist_horse_dist_win_rate'
+    ], inplace=True, errors='ignore')
 else:
     st.sidebar.error("❌ 未能讀取歷史大表，目前正在使用預設值！")
     df['jockey_win_rate'] = df.get('jockey_win_rate', 0.08)
     df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
     df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
     df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
-
-df['horse_last_rank'] = df.get('horse_last_rank', 6.0)
-
-if '距離' not in df.columns: df['距離'] = 1200
-if 'horse_surface_win_rate' not in df.columns: df['horse_surface_win_rate'] = 0.08
-if 'horse_dist_win_rate' not in df.columns: df['horse_dist_win_rate'] = 0.08
+    df['horse_last_rank'] = df.get('horse_last_rank', 6.5)
+    df['horse_surface_win_rate'] = df.get('horse_surface_win_rate', 0.08)
+    df['horse_dist_win_rate'] = df.get('horse_dist_win_rate', 0.08)
 
 # 2. 提取 15 大特徵並預測勝率與 EV
 feature_cols = FEATURE_COLS_15
@@ -876,7 +924,7 @@ with tab1:
     else:
         target_race = col_r.number_input("當前操作／查看場次", min_value=1, max_value=15, value=1, step=1)
 
-    target_time = col_t.time_input("預定開跑時間", value=datetime.strptime("14:30", "%H:%M").time())
+    target_time = col_t.time_input("預定開跑時間", value=datetime.strptime("18:45", "%H:%M").time())
     
     try:
         race_date = datetime.strptime(api_date.strip(), "%Y-%m-%d").date()
@@ -991,7 +1039,6 @@ with tab1:
 
             for race_no, markets in live_by_race.items():
                 r_int = int(race_no)
-                # 🚀 核心保護：如果該場次已經被凍結，跳過不更新！
                 if r_int in st.session_state['frozen_races']:
                     skipped_frozen.append(f"R{r_int}")
                     continue
@@ -1041,9 +1088,10 @@ with tab1:
 
         if len(sorted_group) >= 1:
             top1 = sorted_group.iloc[0]
+            last_r_str = f"上仗:{int(top1['horse_last_rank'])}" if top1['horse_last_rank'] != 6.5 else "上仗:新馬/無"
             win_pick = (
                 f"馬號 {top1['馬號']} ({top1['馬名']}) "
-                f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | EV:{top1['ev']:.2f}] "
+                f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | EV:{top1['ev']:.2f}] "
                 f"{top1['資金流向']}"
             )
             
@@ -1064,14 +1112,14 @@ with tab1:
             recommendations.append({
                 '賽事編號': race_id,
                 '盤口狀態': freeze_badge,
-                '🎯 獨贏首選 (含資金流向)': win_pick,
+                '🎯 獨贏首選 (含近況與資金流向)': win_pick,
                 '🔗 連贏推薦 (Q)': q_pick,
                 '🔗 位置Q推薦 (QP)': qp_pick
             })
 
     rec_df = pd.DataFrame(recommendations)
     if rec_df.empty:
-        st.warning("⚠️️ 沒有符合當前篩選條件的馬匹。")
+        st.warning("⚠️ 沒有符合當前篩選條件的馬匹。")
     else:
         st.dataframe(rec_df, use_container_width=True, hide_index=True)
 
@@ -1088,6 +1136,8 @@ with tab1:
             '騎師': race_detail_df['騎師'],
             '練馬師': race_detail_df['練馬師'],
             '檔位': race_detail_df['排位檔位'],
+            '上仗名次': race_detail_df['horse_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
+            '同程勝率': (race_detail_df['horse_dist_win_rate'] * 100).round(1).astype(str) + '%',
             'AI 勝率': (race_detail_df['pred_win_prob'] * 100).round(1).astype(str) + '%',
             '基準賠率': race_detail_df['基準賠率'].round(1),
             '買時/最新獨贏': race_detail_df['獨贏賠率'].round(1),
@@ -1099,7 +1149,7 @@ with tab1:
 
     st.markdown("---")
     st.subheader("🛒 虛擬模擬投注站 (Paper Trading)")
-    st.caption("開跑前 2~3 分鐘看準上方推薦後，在此鎖定當下買入賠率（下注同時可順手按上方🔒凍結該場盤口）。")
+    st.caption("開跑前 2~3 分鐘看準上方推薦後，在此鎖定當下買入賠率（下注同時會自動🔒凍結該場盤口）。")
 
     col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns([1, 2, 1.5, 1.5, 1.5])
     
@@ -1137,7 +1187,6 @@ with tab1:
         }])
         
         st.session_state['simulated_bets'] = pd.concat([st.session_state['simulated_bets'], new_bet], ignore_index=True)
-        # 下注同時自動凍結該場盤口
         st.session_state['frozen_races'][int(sim_race)] = now_str
         st.success(f"✅ 成功記錄注單並自動凍結第 {sim_race} 場買時盤口：{horse_no_raw} 號 ({bet_type}) @ 賠率 {current_odds}")
 
@@ -1148,13 +1197,13 @@ with tab1:
         dl_col, clear_col = st.columns([2, 2])
         csv_sim = st.session_state['simulated_bets'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         dl_col.download_button(
-            label="⬇️️ 下載模擬注單 (CSV)",
+            label="⬇️ 下載模擬注單 (CSV)",
             data=csv_sim,
             file_name=f"simulated_bets_{api_date}.csv",
             mime="text/csv",
             use_container_width=True
         )
-        if clear_col.button("🗑️️ 清除所有模擬紀錄", use_container_width=True):
+        if clear_col.button("🗑️ 清除所有模擬紀錄", use_container_width=True):
             st.session_state['simulated_bets'] = pd.DataFrame(columns=[
                 '下注時間', '賽事編號', '場次', '馬號', '馬名', '玩法', '買入賠率', '注碼'
             ])
@@ -1197,6 +1246,7 @@ with tab2:
                     win_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
+                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '買時賠率 (選馬用)': round(pick['獨贏賠率'], 1),
                         '最終賠率 (派彩用)': round(float(settlement_win_odds), 1),
@@ -1244,6 +1294,7 @@ with tab2:
                     place_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
+                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '位置賠率': round(p_odds, 2),
                         '買時 EV': round(pick['ev'], 2),
@@ -1341,6 +1392,7 @@ with tab2:
                     p3_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
+                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '位置賠率': round(p_odds, 2),
                         '買時 EV': round(pick['ev'], 2),
