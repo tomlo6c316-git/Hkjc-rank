@@ -23,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (15特徵全開 + 單場凍結與落飛追蹤)")
+st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援雙算分引擎 + 單場凍結)")
 st.markdown("---")
 
 # 初始化模擬投注紀錄與單場凍結名單
@@ -305,12 +305,17 @@ backtest_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙ 投注策略與抗噪設定")
+st.sidebar.header("⚙ 投注策略與算分引擎")
 strategy_mode = st.sidebar.radio(
-    "推薦排序核心邏輯",
-    ["🛡️ 抗噪穩定 (基本面優先 + 排除回飛)", "⚡ 傳統純 EV 排序 (高賠率優先)"],
+    "1️⃣ 推薦排序核心邏輯",
+    ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (基本面優先 + 排除回飛)"],
     index=0,
-    help="【抗噪穩定】會過濾掉臨場賠率大幅回升(回飛超過25%)的冷卻馬，並對落飛馬給予加分，解決臨場推薦跳動問題；【傳統純 EV】則完全依賴 EV 高低排序。"
+    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】會過濾掉臨場回飛超過 25% 的冷卻馬，並對落飛馬加分。"
+)
+use_dynamic_form = st.sidebar.checkbox(
+    "2️⃣ 將「上仗名次與同程勝率」納入 AI 算分",
+    value=False,
+    help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓第3場6號這種反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
 )
 min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.1)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
@@ -766,14 +771,14 @@ df['距離'] = pd.to_numeric(df['距離'], errors='coerce').fillna(1200).astype(
 if '場地' not in df.columns:
     df['場地'] = '草地'
 
-# === 補全真實歷史數據 (15 大特徵完全接通版) ===
+# === 補全真實歷史數據 (視覺與算分雙軌設計) ===
 hist_stats = load_historical_stats()
 if hist_stats is not None:
     (
         jockey_stats, trainer_stats, horse_stats, combo_stats,
         horse_last_rank_stats, horse_surface_stats, horse_dist_stats
     ) = hist_stats
-    st.sidebar.success(f"✅ 歷史大表 15 特徵全開！已載入 {len(horse_stats)} 匹馬完整生涯、近況與路程數據。")
+    st.sidebar.success(f"✅ 歷史大表讀取成功！已載入 {len(horse_stats)} 匹馬完整生涯、近況與路程數據。")
     
     df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
@@ -781,13 +786,10 @@ if hist_stats is not None:
     df['_clean_surface'] = df['場地'].astype(str).str.strip()
     df['_clean_dist'] = df['距離'].astype(int)
     
-    # 對齊騎練與馬匹基本勝率
     df = df.merge(jockey_stats, on='_clean_jockey', how='left')
     df = df.merge(trainer_stats, on='_clean_trainer', how='left')
     df = df.merge(horse_stats, on='_clean_horse', how='left')
     df = df.merge(combo_stats, on=['_clean_jockey', '_clean_trainer'], how='left')
-    
-    # 對齊馬匹上仗名次、場地勝率、同程勝率
     df = df.merge(horse_last_rank_stats, on='_clean_horse', how='left')
     df = df.merge(horse_surface_stats, on=['_clean_horse', '_clean_surface'], how='left')
     df = df.merge(horse_dist_stats, on=['_clean_horse', '_clean_dist'], how='left')
@@ -797,11 +799,21 @@ if hist_stats is not None:
     df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
     df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
     
-    # 上仗名次：若為初出新馬無紀錄，預設給予中間名次 6.5
-    df['horse_last_rank'] = df['hist_horse_last_rank'].fillna(6.5)
-    # 場地與路程勝率：若該馬首次跑該場地/路程，退回使用該馬自身的總勝率 (horse_win_rate)，再無則給 0.06
-    df['horse_surface_win_rate'] = df['hist_horse_surface_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
-    df['horse_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    # 儲存真實近況與路程數據供畫面表格顯示 (不受算分開關影響)
+    df['real_last_rank'] = df['hist_horse_last_rank'].fillna(6.5)
+    df['real_surface_win_rate'] = df['hist_horse_surface_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    df['real_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    
+    # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
+    if use_dynamic_form:
+        df['horse_last_rank'] = df['real_last_rank']
+        df['horse_surface_win_rate'] = df['real_surface_win_rate']
+        df['horse_dist_win_rate'] = df['real_dist_win_rate']
+    else:
+        # 1004 爆冷模式：維持模型訓練時習慣的固定常數，不因上仗落敗而扣掉黑馬分數！
+        df['horse_last_rank'] = 6.0
+        df['horse_surface_win_rate'] = 0.08
+        df['horse_dist_win_rate'] = 0.08
     
     df.drop(columns=[
         '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
@@ -814,9 +826,12 @@ else:
     df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
     df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
     df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
-    df['horse_last_rank'] = df.get('horse_last_rank', 6.5)
-    df['horse_surface_win_rate'] = df.get('horse_surface_win_rate', 0.08)
-    df['horse_dist_win_rate'] = df.get('horse_dist_win_rate', 0.08)
+    df['real_last_rank'] = 6.5
+    df['real_surface_win_rate'] = 0.08
+    df['real_dist_win_rate'] = 0.08
+    df['horse_last_rank'] = 6.0
+    df['horse_surface_win_rate'] = 0.08
+    df['horse_dist_win_rate'] = 0.08
 
 # 2. 提取 15 大特徵並預測勝率與 EV
 feature_cols = FEATURE_COLS_15
@@ -1070,7 +1085,8 @@ with tab1:
             st.session_state['odds_last_error'] = error
 
     locked_time_str = st.session_state.get('baseline_locked_time', '未鎖定')
-    st.caption(f"📌 目前【早盤基準賠率】鎖定狀態：`{locked_time_str}` ｜ 當前排序模式：`{strategy_mode}`")
+    form_mode_str = "🔥 真實近況與同程算分" if use_dynamic_form else "🎯 1004 爆冷模式 (固定常數算分)"
+    st.caption(f"📌 早盤基準：`{locked_time_str}` ｜ 排序：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}`")
 
     if st.session_state.get('odds_last_error'):
         st.warning(st.session_state['odds_last_error'])
@@ -1088,7 +1104,7 @@ with tab1:
 
         if len(sorted_group) >= 1:
             top1 = sorted_group.iloc[0]
-            last_r_str = f"上仗:{int(top1['horse_last_rank'])}" if top1['horse_last_rank'] != 6.5 else "上仗:新馬/無"
+            last_r_str = f"上仗:{int(top1['real_last_rank'])}" if top1['real_last_rank'] != 6.5 else "上仗:新馬/無"
             win_pick = (
                 f"馬號 {top1['馬號']} ({top1['馬名']}) "
                 f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | EV:{top1['ev']:.2f}] "
@@ -1136,8 +1152,8 @@ with tab1:
             '騎師': race_detail_df['騎師'],
             '練馬師': race_detail_df['練馬師'],
             '檔位': race_detail_df['排位檔位'],
-            '上仗名次': race_detail_df['horse_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
-            '同程勝率': (race_detail_df['horse_dist_win_rate'] * 100).round(1).astype(str) + '%',
+            '上仗名次': race_detail_df['real_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
+            '同程勝率': (race_detail_df['real_dist_win_rate'] * 100).round(1).astype(str) + '%',
             'AI 勝率': (race_detail_df['pred_win_prob'] * 100).round(1).astype(str) + '%',
             '基準賠率': race_detail_df['基準賠率'].round(1),
             '買時/最新獨贏': race_detail_df['獨贏賠率'].round(1),
@@ -1197,13 +1213,13 @@ with tab1:
         dl_col, clear_col = st.columns([2, 2])
         csv_sim = st.session_state['simulated_bets'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         dl_col.download_button(
-            label="⬇️ 下載模擬注單 (CSV)",
+            label="⬇️️ 下載模擬注單 (CSV)",
             data=csv_sim,
             file_name=f"simulated_bets_{api_date}.csv",
             mime="text/csv",
             use_container_width=True
         )
-        if clear_col.button("🗑️ 清除所有模擬紀錄", use_container_width=True):
+        if clear_col.button("🗑️️ 清除所有模擬紀錄", use_container_width=True):
             st.session_state['simulated_bets'] = pd.DataFrame(columns=[
                 '下注時間', '賽事編號', '場次', '馬號', '馬名', '玩法', '買入賠率', '注碼'
             ])
@@ -1212,7 +1228,7 @@ with tab1:
 # ---------------- 分頁 2: 賽後回測 ----------------
 with tab2:
     st.subheader("📊 多彩種策略回測總覽 (買時賠率選馬 vs 官方最終派彩)")
-    st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}` ｜ 選馬依據：主畫面鎖定之【買時賠率】 ｜ 派彩依據：上傳賽果之【官方最終賠率】")
+    st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}`")
     if not backtest_ready:
         st.warning("請在左側上傳已完賽的結果 CSV。需有『賽事編號』、『馬號』及『名次』。")
     else:
@@ -1246,7 +1262,7 @@ with tab2:
                     win_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
-                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
+                        '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '買時賠率 (選馬用)': round(pick['獨贏賠率'], 1),
                         '最終賠率 (派彩用)': round(float(settlement_win_odds), 1),
@@ -1294,7 +1310,7 @@ with tab2:
                     place_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
-                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
+                        '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '位置賠率': round(p_odds, 2),
                         '買時 EV': round(pick['ev'], 2),
@@ -1392,7 +1408,7 @@ with tab2:
                     p3_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
-                        '上仗名次': "新馬/無" if pick['horse_last_rank'] == 6.5 else f"第 {int(pick['horse_last_rank'])} 名",
+                        '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '位置賠率': round(p_odds, 2),
                         '買時 EV': round(pick['ev'], 2),
