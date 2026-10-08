@@ -573,6 +573,8 @@ def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val):
     return group[cond].sort_values(by=sort_col, ascending=False).reset_index(drop=True)
 
 df_backtest = df.copy()
+# 👇 補上這行，確保沒有上傳檔案時有預設值：
+backtest_ready = False
 if backtest_file is not None:
     try:
         try: result_raw = pd.read_csv(backtest_file, encoding='utf-8-sig')
