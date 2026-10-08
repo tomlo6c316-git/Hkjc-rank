@@ -597,6 +597,9 @@ if backtest_file is not None:
         if '_result_win_odds' in df_backtest.columns: df_backtest['回測獨贏賠率'] = pd.to_numeric(df_backtest['_result_win_odds'], errors='coerce')
         if '_result_place_odds' in df_backtest.columns: df_backtest['回測位置賠率'] = pd.to_numeric(df_backtest['_result_place_odds'], errors='coerce')
         df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
+        if not df_backtest.empty:
+                backtest_ready = True
+                st.sidebar.success(f"✅ 成功配對回測賽果：共 {len(df_backtest)} 匹")
     except Exception as exc: st.sidebar.error(f"回測讀取失敗：{exc}")
 
 tab1, tab2 = st.tabs(["🎯 預測推薦與單場凍結", "📈 歷史回測 (買時選馬 vs 最終派彩)"])
