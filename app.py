@@ -864,4 +864,36 @@ with tab2:
                 for _, bet in sim_df.iterrows():
                     race_id, horse_no, bet_type, stake = bet['賽事編號'], str(bet['馬號']), bet['玩法'], float(bet['注碼'])
                     sim_invested += stake
-                    match = df_backtest[(df_backtest['賽事編號'] == race_id) & (df_backtest
+                    match = df_backtest[(df_backtest['賽事編號'] == race_id) & (df_backtest['馬號'].astype(str) == horse_no)]
+
+                    if match.empty or pd.isna(match['numeric_rank'].values[0]) or match['numeric_rank'].values[0] == 99:
+                        sim_results.append({**bet, '實際名次': '-', '結果': '⏳ 待開彩', '派彩': '$0.0', '淨盈虧': '$0.0'})
+                    else:
+                        rank = match['numeric_rank'].values[0]
+                        rank_str = str(match['名次'].values[0]).replace('.0', '')
+                        is_hit = (bet_type == "WIN" and rank == 1) or (bet_type == "PLA" and rank <= 3)
+                        
+                        col_odds = '回測獨贏賠率' if bet_type == "WIN" else '回測位置賠率'
+                        sp_odds = match.get(col_odds, pd.Series([np.nan])).values[0]
+                        final_odds = float(sp_odds) if pd.notna(sp_odds) and float(sp_odds) > 1.0 else float(bet['買入賠率'])
+                        
+                        payout = stake * final_odds if is_hit else 0
+                        if is_hit:
+                            sim_hits += 1
+                            sim_return += payout
+                            
+                        sim_results.append({
+                            '下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})",
+                            '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': bet['買入賠率'], '最終賠率': round(final_odds, 1),
+                            '實際名次': f"第 {rank_str} 名", '結果': "✅ 贏" if is_hit else "❌ 輸",
+                            '派彩': f"${payout:.1f}", '淨盈虧': f"${payout - stake:.1f}"
+                        })
+
+                if sim_invested > 0:
+                    roi = ((sim_return - sim_invested) / sim_invested) * 100
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("模擬注數", f"{len(sim_df)} 注")
+                    c2.metric("命中注數", f"{sim_hits} 注", f"勝率: {sim_hits/len(sim_df)*100:.1f}%")
+                    c3.metric("總投入", f"${sim_invested:,.1f}")
+                    c4.metric("總回收", f"${sim_return:,.1f}", f"ROI: {roi:.2f}%")
+                    st.dataframe(pd.DataFrame(sim_results), use_container_width=True, hide_index=True)
