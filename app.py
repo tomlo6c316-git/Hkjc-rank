@@ -675,7 +675,6 @@ with tab1:
         }), use_container_width=True, hide_index=True)
 
 with tab2:
-    with tab2:
     st.subheader("📊 多彩種策略回測總覽 (買時賠率選馬 vs 官方最終派彩)")
     st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}`")
     
