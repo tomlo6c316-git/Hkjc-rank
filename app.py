@@ -23,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援雙算分引擎 + 單場凍結)")
+st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援三算分引擎 + 單場凍結)")
 st.markdown("---")
 
 # 初始化模擬投注紀錄與單場凍結名單
@@ -308,9 +308,9 @@ st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略與算分引擎")
 strategy_mode = st.sidebar.radio(
     "1️⃣ 推薦排序核心邏輯",
-    ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (基本面優先 + 排除回飛)"],
+    ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (基本面優先 + 排除回飛)", "🎯 純 AI 勝率最高 (命中率優先)"],
     index=0,
-    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】會過濾掉臨場回飛超過 25% 的冷卻馬，並對落飛馬加分。"
+    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】過濾臨場大幅回飛馬並加成落飛馬；【純 AI 勝率】無視賠率高低，單純挑選模型預測勝率最高的馬匹，最適合用來找位置(Place)或位置Q穩膽！"
 )
 use_dynamic_form = st.sidebar.checkbox(
     "2️⃣ 將「上仗名次與同程勝率」納入 AI 算分",
@@ -318,7 +318,7 @@ use_dynamic_form = st.sidebar.checkbox(
     help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓第3場6號這種反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
 )
 min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.1)
-min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0)
+min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="⚠️ 提示：若使用【🎯 純 AI 勝率最高】模式尋找熱門穩膽，建議將此數值調低至 1.0，以免錯殺優質大熱門！")
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
 
 # ==========================================
@@ -778,7 +778,6 @@ if hist_stats is not None:
         jockey_stats, trainer_stats, horse_stats, combo_stats,
         horse_last_rank_stats, horse_surface_stats, horse_dist_stats
     ) = hist_stats
-    st.sidebar.success(f"✅ 歷史大表讀取成功！已載入 {len(horse_stats)} 匹馬完整生涯、近況與路程數據。")
     
     df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
     df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
@@ -848,11 +847,14 @@ df['ev'] = df['pred_win_prob'] * df['獨贏賠率']
 drop_bonus = np.clip(df['odds_drop_pct'] / 100.0, -0.35, 0.30)
 df['smart_score'] = df['pred_win_prob'] * (1.0 + drop_bonus)
 
+# 🚀 核心過濾與排序邏輯 (加入純勝率模式)
 def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val):
     cond = (group['ev'] >= min_ev_val) & (group['獨贏賠率'] >= min_odds_val) & (group['獨贏賠率'] <= max_odds_val)
     if mode.startswith("🛡️"):
         cond = cond & (group['odds_drop_pct'] > -25.0)
         sort_col = 'smart_score'
+    elif mode.startswith("🎯"):
+        sort_col = 'pred_win_prob'
     else:
         sort_col = 'ev'
     return group[cond].sort_values(by=sort_col, ascending=False).reset_index(drop=True)
@@ -900,9 +902,6 @@ if backtest_file is not None:
             has_official_result = df_backtest['_result_match'].eq('both') & df_backtest['_result_rank'].notna()
             matched = int(has_official_result.sum())
             backtest_ready = matched > 0
-            if backtest_ready:
-                df_backtest = df_backtest.loc[has_official_result].copy()
-            df_backtest.drop(columns=['_race_key', '_horse_key', '_result_rank', '_result_win_odds', '_result_place_odds', '_result_match'], errors='ignore', inplace=True)
             if backtest_ready:
                 st.sidebar.success(f"{result_source_label}已配對：{matched} 匹")
             else:
@@ -1144,7 +1143,13 @@ with tab1:
     st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與 AI 實力深度雷達 ({status_tag})")
     race_detail_df = df[df['賽事編號'].map(extract_race_no) == target_race].copy()
     if not race_detail_df.empty:
-        sort_col_detail = 'smart_score' if strategy_mode.startswith("🛡️") else 'ev'
+        if strategy_mode.startswith("🛡️"):
+            sort_col_detail = 'smart_score'
+        elif strategy_mode.startswith("🎯"):
+            sort_col_detail = 'pred_win_prob'
+        else:
+            sort_col_detail = 'ev'
+            
         race_detail_df = race_detail_df.sort_values(by=sort_col_detail, ascending=False).reset_index(drop=True)
         display_detail = pd.DataFrame({
             '馬號': race_detail_df['馬號'],
@@ -1213,13 +1218,13 @@ with tab1:
         dl_col, clear_col = st.columns([2, 2])
         csv_sim = st.session_state['simulated_bets'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         dl_col.download_button(
-            label="⬇️️ 下載模擬注單 (CSV)",
+            label="⬇ 下載模擬注單 (CSV)",
             data=csv_sim,
             file_name=f"simulated_bets_{api_date}.csv",
             mime="text/csv",
             use_container_width=True
         )
-        if clear_col.button("🗑️️ 清除所有模擬紀錄", use_container_width=True):
+        if clear_col.button("🗑 清除所有模擬紀錄", use_container_width=True):
             st.session_state['simulated_bets'] = pd.DataFrame(columns=[
                 '下注時間', '賽事編號', '場次', '馬號', '馬名', '玩法', '買入賠率', '注碼'
             ])
