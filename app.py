@@ -23,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援三算分引擎 + 單場凍結)")
+st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (凱利注碼 + 雙算分引擎)")
 st.markdown("---")
 
 # 初始化模擬投注紀錄與單場凍結名單
@@ -298,28 +298,40 @@ else:
     st.sidebar.caption(f"目前使用選單檔案：{selected_csv_name}")
 
 backtest_file = st.sidebar.file_uploader(
-    "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
+    "回測用：上傳已完成賽事 CSV",
     type=['csv'],
     key='backtest_results_upload',
-    help='上傳已完賽的結果檔案，系統會用上方鎖定的【買時賠率】選馬，並用此檔案的【最終賠率】計算真實派彩！',
+    help='系統會用上方鎖定的【買時賠率】選馬，並用此檔案的【最終賠率】計算真實派彩！',
 )
 
+# ==========================================
+# ⚙️ 策略、資金與算分引擎設定
+# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略與算分引擎")
 strategy_mode = st.sidebar.radio(
     "1️⃣ 推薦排序核心邏輯",
     ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (基本面優先 + 排除回飛)", "🎯 純 AI 勝率最高 (命中率優先)"],
     index=0,
-    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】過濾臨場大幅回飛馬並加成落飛馬；【純 AI 勝率】無視賠率高低，單純挑選模型預測勝率最高的馬匹，最適合用來找位置(Place)或位置Q穩膽！"
+    help="【傳統純 EV】完全依賴 EV 高低排序；【抗噪穩定】過濾臨場大幅回飛馬並加成落飛馬；【純 AI 勝率】無視賠率高低，最適合用來找位置(Place)或位置Q穩膽！"
 )
 use_dynamic_form = st.sidebar.checkbox(
-    "2️⃣ 將「上仗名次與同程勝率」納入 AI 算分",
+    "2️⃣ 將「上仗名次與同程勝率」納入算分",
     value=False,
-    help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓第3場6號這種反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
+    help="預設不勾選：AI 算分維持固定常數 (6.0 / 0.08)，專抓表面近況不佳的爆冷馬！勾選後則將真實近況納入算分。"
 )
-min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.1)
-min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="⚠️ 提示：若使用【🎯 純 AI 勝率最高】模式尋找熱門穩膽，建議將此數值調低至 1.0，以免錯殺優質大熱門！")
-max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
+min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 2.5, 0.1, help="實戰黃金門檻：2.5")
+min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="若尋找熱門穩膽，建議調低至 1.5 左右。")
+max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=25.0)
+
+st.sidebar.markdown("---")
+st.sidebar.header("💰 資金管理 (凱利注碼精算)")
+total_bankroll = st.sidebar.number_input("💵 單日總本金預算 (HKD)", min_value=100, max_value=1000000, value=5000, step=500)
+kelly_fraction = st.sidebar.slider(
+    "🎛️ 凱利保守係數 (Fractional Kelly)", 
+    0.05, 1.0, 0.15, 0.05, 
+    help="賽馬變異數高，強烈建議使用 0.1~0.25 (十分之一到四分之一凱利) 來保護本金，避免因連敗而破產。"
+)
 
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版)
@@ -847,6 +859,14 @@ df['ev'] = df['pred_win_prob'] * df['獨贏賠率']
 drop_bonus = np.clip(df['odds_drop_pct'] / 100.0, -0.35, 0.30)
 df['smart_score'] = df['pred_win_prob'] * (1.0 + drop_bonus)
 
+# 4. 💰 計算動態注碼 (凱利公式)
+# 確保賠率分母不為零，防呆處理
+safe_odds = np.maximum(df['獨贏賠率'], 1.01)
+raw_kelly = (df['ev'] - 1.0) / (safe_odds - 1.0)
+df['kelly_pct'] = np.clip(raw_kelly, 0.0, 1.0)
+# 將計算出的注碼向下取整至 10 的倍數，方便實戰下注
+df['suggested_stake'] = np.floor((total_bankroll * df['kelly_pct'] * kelly_fraction) / 10) * 10
+
 # 🚀 核心過濾與排序邏輯 (加入純勝率模式)
 def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val):
     cond = (group['ev'] >= min_ev_val) & (group['獨贏賠率'] >= min_odds_val) & (group['獨贏賠率'] <= max_odds_val)
@@ -1107,6 +1127,7 @@ with tab1:
             win_pick = (
                 f"馬號 {top1['馬號']} ({top1['馬名']}) "
                 f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | EV:{top1['ev']:.2f}] "
+                f"💰 建議注碼: ${top1['suggested_stake']:.0f} | "
                 f"{top1['資金流向']}"
             )
             
@@ -1158,13 +1179,12 @@ with tab1:
             '練馬師': race_detail_df['練馬師'],
             '檔位': race_detail_df['排位檔位'],
             '上仗名次': race_detail_df['real_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
-            '同程勝率': (race_detail_df['real_dist_win_rate'] * 100).round(1).astype(str) + '%',
             'AI 勝率': (race_detail_df['pred_win_prob'] * 100).round(1).astype(str) + '%',
             '基準賠率': race_detail_df['基準賠率'].round(1),
             '買時/最新獨贏': race_detail_df['獨贏賠率'].round(1),
             '資金流向': race_detail_df['資金流向'],
             'EV (期望值)': race_detail_df['ev'].round(2),
-            '抗噪綜合分': (race_detail_df['smart_score'] * 100).round(1)
+            '建議注碼': race_detail_df['suggested_stake'].apply(lambda x: f"${x:.0f}" if x > 0 else "$0")
         })
         st.dataframe(display_detail, use_container_width=True, hide_index=True)
 
