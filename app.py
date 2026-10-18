@@ -65,8 +65,13 @@ else:
     st.sidebar.warning("⚠️ 找不到 `my_hkjc_place_model.pkl`，位置彩池將暫用獨贏模型代算。")
 
 @st.cache_data
-def load_historical_stats(cutoff_date_str="99999999", history_csv_path='hkjc_all_seasons_features.csv'):
-    csv_path = Path(__file__).resolve().parent / history_csv_path
+def load_historical_stats(
+    history_csv_path='hkjc_all_seasons_features.csv', 
+    cutoff_date_str="99999999", 
+    history_signature=None, 
+    *args, **kwargs
+):
+    csv_path = Path(__file__).resolve().parent / str(history_csv_path)
     if not os.path.exists(csv_path):
         return None
     
@@ -76,15 +81,18 @@ def load_historical_stats(cutoff_date_str="99999999", history_csv_path='hkjc_all
         except UnicodeDecodeError:
             hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
             
-        # 🔥 【加在這裡】時間防火牆：只保留「當前賽卡日期之前」的歷史紀錄！
-        if '賽事編號' in hist_df.columns and cutoff_date_str != "99999999":
-            hist_df['_date_str'] = hist_df['賽事編號'].astype(str).str.extract(r'(20\d{6})')[0].fillna('00000000')
-            hist_df = hist_df[hist_df['_date_str'] < cutoff_date_str].copy()
-            
+        # 🔥 時間防火牆：自動相容各種日期格式 (如 2026-10-11 或 20261011)
+        if '賽事編號' in hist_df.columns and cutoff_date_str and str(cutoff_date_str) != "99999999":
+            clean_cutoff = re.sub(r'\D', '', str(cutoff_date_str))[:8]
+            if len(clean_cutoff) == 8:
+                hist_df['_date_str'] = hist_df['賽事編號'].astype(str).str.extract(r'(20\d{6})')[0].fillna('00000000')
+                hist_df = hist_df[hist_df['_date_str'] < clean_cutoff].copy()
+                
         if hist_df.empty:
             return None
 
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
+        # ... (下方原本計算勝率的程式碼完全保持不變！)
         # ... (下面的程式碼全部保持原本的不用動！)
         hist_df = hist_df[hist_df['numeric_rank'].notna()].copy()
         if hist_df.empty:
@@ -985,7 +993,8 @@ if df['_prediction_date'].isna().any():
     st.stop()
 enriched_parts = []
 for target_date, target_rows in df.groupby('_prediction_date', sort=False):
-    hist_stats = load_historical_stats('hkjc_all_seasons_features.csv', target_date, history_signature)
+    clean_target_date = re.sub(r'\D', '', str(target_date))[:8] if 'target_date' in locals() else "99999999"
+    hist_stats = load_historical_stats(cutoff_date_str=clean_target_date, history_csv_path='hkjc_all_seasons_features.csv')
     if hist_stats is None:
         st.error(f'{target_date}之前沒有可用且日期可解析的歷史賽果；該日不會使用全歷史或預設值預測。')
         st.stop()
