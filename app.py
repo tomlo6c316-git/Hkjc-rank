@@ -23,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🐎 HKJC 15大特徵預測工作台（時間截斷歷史、GraphQL自動賠率更新）")
+st.title("🐎 HKJC 旗艦 15 大特徵 AI 預測系統 (支援三算分引擎 + 單場凍結)")
 st.markdown("---")
 
 # 初始化模擬投注紀錄與單場凍結名單
@@ -37,7 +37,6 @@ if 'frozen_races' not in st.session_state:
 # 設定 repo 內的模型及預測 CSV 路徑
 APP_DIR = Path(__file__).resolve().parent
 MODEL_PATH = APP_DIR / 'my_hkjc_model.pkl'
-PLACE_MODEL_PATH = APP_DIR / 'my_hkjc_place_model.pkl'
 PREDICTION_CSV_PATH = APP_DIR / 'prediction.csv'
 FEATURE_COLS_15 = [
     'market_implied_prob', '獨贏賠率', 'odds_rank', 'is_favorite',
@@ -48,87 +47,78 @@ FEATURE_COLS_15 = [
 ]
 
 @st.cache_resource
-def load_models():
-    win_m = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
-    place_m = joblib.load(PLACE_MODEL_PATH) if os.path.exists(PLACE_MODEL_PATH) else None
-    return win_m, place_m
+def load_model():
+    if os.path.exists(MODEL_PATH):
+        return joblib.load(MODEL_PATH)
+    return None
 
-model_win, model_place = load_models()
+model = load_model()
 
-if model_win is None:
-    st.error(f"⚠️ 找不到獨贏 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
+if model is None:
+    st.error(f"⚠️ 找不到 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
     st.stop()
 
-if model_place is not None:
-    st.sidebar.success("🧠 雙渦輪引擎已啟動：獨贏模型 + 位置模型")
-else:
-    st.sidebar.warning("⚠️ 找不到 `my_hkjc_place_model.pkl`，位置彩池將暫用獨贏模型代算。")
-
 @st.cache_data
-def load_historical_stats(
-    history_csv_path='hkjc_all_seasons_features.csv', 
-    cutoff_date_str="99999999", 
-    history_signature=None, 
-    *args, **kwargs
-):
-    csv_path = Path(__file__).resolve().parent / str(history_csv_path)
+def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
+    """從歷史大表中計算騎師、練馬師、馬匹勝率，以及馬匹上仗名次、場地勝率、路程勝率"""
+    csv_path = Path(__file__).resolve().parent / history_csv_path
     if not os.path.exists(csv_path):
         return None
     
     try:
-        try:
-            hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
-        except UnicodeDecodeError:
-            hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
-            
-        # 🔥 時間防火牆：自動相容各種日期格式 (如 2026-10-11 或 20261011)
-        if '賽事編號' in hist_df.columns and cutoff_date_str and str(cutoff_date_str) != "99999999":
-            clean_cutoff = re.sub(r'\D', '', str(cutoff_date_str))[:8]
-            if len(clean_cutoff) == 8:
-                hist_df['_date_str'] = hist_df['賽事編號'].astype(str).str.extract(r'(20\d{6})')[0].fillna('00000000')
-                hist_df = hist_df[hist_df['_date_str'] < clean_cutoff].copy()
-                
-        if hist_df.empty:
-            return None
-
+        hist_df = pd.read_csv(csv_path, low_memory=False)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
-        # ... (下方原本計算勝率的程式碼完全保持不變！)
-        # ... (下面的程式碼全部保持原本的不用動！)
-        hist_df = hist_df[hist_df['numeric_rank'].notna()].copy()
-        if hist_df.empty:
-            return None
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
+        
+        # 預先清洗歷史大表的名稱欄位，確保比對精準
         hist_df['_clean_jockey'] = hist_df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
         hist_df['_clean_trainer'] = hist_df['練馬師'].astype(str).str.replace(' ', '')
         hist_df['_clean_horse'] = hist_df['馬名'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
-
+        
+        # 1. 基本騎師、練馬師、馬匹、騎練合作勝率
         jockey_stats = hist_df.groupby('_clean_jockey', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_jockey_win_rate'})
         trainer_stats = hist_df.groupby('_clean_trainer', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_trainer_win_rate'})
         horse_stats = hist_df.groupby('_clean_horse', as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_horse_win_rate'})
         combo_stats = hist_df.groupby(['_clean_jockey', '_clean_trainer'], as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_combo_win_rate'})
-
-        valid_ranks_df = hist_df.sort_values(['_race_date', '賽事編號'], kind='stable').copy()
-        recent_j_df = valid_ranks_df.groupby('_clean_jockey', sort=False).tail(50)
-        recent_jockey_stats = recent_j_df.groupby('_clean_jockey', as_index=False)['is_win'].mean().rename(columns={'is_win': 'recent_jockey_win_rate'})
-        jockey_stats = jockey_stats.merge(recent_jockey_stats, on='_clean_jockey', how='left')
-        recent_t_df = valid_ranks_df.groupby('_clean_trainer', sort=False).tail(50)
-        recent_trainer_stats = recent_t_df.groupby('_clean_trainer', as_index=False)['is_win'].mean().rename(columns={'is_win': 'recent_trainer_win_rate'})
-        trainer_stats = trainer_stats.merge(recent_trainer_stats, on='_clean_trainer', how='left')
-        horse_last_rank_stats = valid_ranks_df.groupby('_clean_horse', as_index=False, sort=False).tail(1)[['_clean_horse', 'numeric_rank']].rename(columns={'numeric_rank': 'hist_horse_last_rank'})
-
+        
+        # 2. 馬匹「上仗名次 (horse_last_rank)」：依賽事編號排序，取每匹馬最後一場有效名次
+        valid_ranks_df = hist_df.dropna(subset=['numeric_rank']).copy()
+        if '賽事編號' in valid_ranks_df.columns:
+            valid_ranks_df = valid_ranks_df.sort_values('賽事編號')
+        horse_last_rank_stats = (
+            valid_ranks_df.groupby('_clean_horse', as_index=False)
+            .last()[['_clean_horse', 'numeric_rank']]
+            .rename(columns={'numeric_rank': 'hist_horse_last_rank'})
+        )
+        
+        # 3. 馬匹「場地勝率 (horse_surface_win_rate)」
         if '場地' in hist_df.columns:
             hist_df['_clean_surface'] = hist_df['場地'].astype(str).str.strip()
-            horse_surface_stats = hist_df.groupby(['_clean_horse', '_clean_surface'], as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_horse_surface_win_rate'})
+            horse_surface_stats = (
+                hist_df.groupby(['_clean_horse', '_clean_surface'], as_index=False)['is_win']
+                .mean()
+                .rename(columns={'is_win': 'hist_horse_surface_win_rate'})
+            )
         else:
             horse_surface_stats = pd.DataFrame(columns=['_clean_horse', '_clean_surface', 'hist_horse_surface_win_rate'])
+            
+        # 4. 馬匹「路程勝率 (horse_dist_win_rate)」
         if '距離' in hist_df.columns:
             hist_df['_clean_dist'] = pd.to_numeric(hist_df['距離'], errors='coerce').fillna(1200).astype(int)
-            horse_dist_stats = hist_df.groupby(['_clean_horse', '_clean_dist'], as_index=False)['is_win'].mean().rename(columns={'is_win': 'hist_horse_dist_win_rate'})
+            horse_dist_stats = (
+                hist_df.groupby(['_clean_horse', '_clean_dist'], as_index=False)['is_win']
+                .mean()
+                .rename(columns={'is_win': 'hist_horse_dist_win_rate'})
+            )
         else:
             horse_dist_stats = pd.DataFrame(columns=['_clean_horse', '_clean_dist', 'hist_horse_dist_win_rate'])
-        return jockey_stats, trainer_stats, horse_stats, combo_stats, horse_last_rank_stats, horse_surface_stats, horse_dist_stats
+            
+        return (
+            jockey_stats, trainer_stats, horse_stats, combo_stats,
+            horse_last_rank_stats, horse_surface_stats, horse_dist_stats
+        )
     except Exception as e:
-        st.error(f'載入歷史數據失敗：{type(e).__name__}: {e}')
+        st.error(f"載入歷史數據失敗：{e}")
         return None
 
 # 根據所選日期從 HKJC 官方排位頁抓取賽卡
@@ -199,10 +189,6 @@ def fetch_hkjc_racecard(race_date):
         distance_match = re.search(r'(\d{4})\s*米', race_html)
         distance = int(distance_match.group(1)) if distance_match else 1200
         surface = '泥地' if ('泥地' in race_html or '全天候' in race_html) else '草地'
-        
-        track_match = re.search(r'"([A-Z0-9\+]+)"\s*賽道', race_html)
-        course_track = track_match.group(1) if track_match else ('泥地' if surface == '泥地' else 'A')
-
         columns = list(race_table.columns)
         horse_no_col = find_column(columns, ('馬號', '編號'), columns[0] if columns else None)
         horse_name_col = find_column(columns, ('馬名',))
@@ -219,8 +205,7 @@ def fetch_hkjc_racecard(race_date):
                 horse_no = horse_no[:-2]
             if not horse_no.isdigit():
                 continue
-            horse_name_raw = str(row[horse_name_col]).strip()
-            horse_name = re.sub(r'\(.*?\)', '', horse_name_raw).strip()
+            horse_name = re.sub(r'\(.*?\)', '', str(row[horse_name_col])).strip()
             if not horse_name or horse_name.lower() == 'nan':
                 continue
             rows.append({
@@ -229,16 +214,14 @@ def fetch_hkjc_racecard(race_date):
                 '名次': '',
                 '馬號': horse_no,
                 '馬名': horse_name,
-                '狀態': '退出' if any(x in horse_name_raw.lower() for x in ('退出', '退賽', 'scratched')) else '',
                 '騎師': str(row[jockey_col]).strip(),
                 '練馬師': str(row[trainer_col]).strip(),
                 '實際負磅': str(row[weight_col]).strip(),
                 '排位檔位': str(row[draw_col]).strip(),
-                '獨贏賠率': np.nan,
-                '位置賠率': np.nan,
+                '獨贏賠率': 10.0,
+                '位置賠率': 1.5,
                 '距離': distance,
                 '場地': surface,
-                '賽道': course_track,
                 'racecourse_code': race_venue,
             })
         time.sleep(0.25)
@@ -300,18 +283,6 @@ if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=Tru
     except Exception as exc:
         st.sidebar.error(f'抓取排位失敗：{type(exc).__name__}: {exc}')
 
-# 下載已抓取的預測 CSV 按鈕
-if st.session_state.get('fetched_prediction_df') is not None:
-    csv_bytes_pred = st.session_state['fetched_prediction_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-    st.sidebar.download_button(
-        label="⬇️ 下載已抓取的預測 CSV",
-        data=csv_bytes_pred,
-        file_name=f"prediction_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv",
-        use_container_width=True,
-        help="將含有最新檔位與賽道的預測表下載到電腦，放回 GitHub 即可永久使用！"
-    )
-
 current_fetched_card = st.session_state.get('fetched_prediction_df')
 if current_fetched_card is not None:
     if st.sidebar.button('🔄 放棄抓取資料，改用上方選單 CSV', use_container_width=True):
@@ -333,33 +304,25 @@ backtest_file = st.sidebar.file_uploader(
     help='上傳已完賽的結果檔案，系統會用上方鎖定的【買時賠率】選馬，並用此檔案的【最終賠率】計算真實派彩！',
 )
 
-# ==========================================
-# ⚙️ 策略、資金與算分引擎設定
-# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙ 投注策略與算分引擎")
 strategy_mode = st.sidebar.radio(
     "1️⃣ 推薦排序核心邏輯",
-    ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (含步速+手風+賽道+排除回飛)", "🎯 純 AI 勝率/入位率最高 (命中率優先)"],
+    ["⚡ 傳統純 EV 排序 (高賠率優先)", "🛡️ 抗噪穩定 (基本面優先 + 排除回飛)", "🎯 純 AI 勝率最高 (命中率優先)"],
     index=0,
-    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】結合落飛資金、預期步速、騎練近期手風與賽道檔位偏差進行綜合算分，並過濾臨場大幅回飛馬；【純 AI 機率】無視賠率高低，單純挑選模型預測機率最高的馬匹！"
+    help="【傳統純 EV】完全依賴 EV 高低排序（重現 1004 贏 +142% 邏輯）；【抗噪穩定】過濾臨場大幅回飛馬並加成落飛馬；【純 AI 勝率】無視賠率高低，單純挑選模型預測勝率最高的馬匹，最適合用來找位置(Place)或位置Q穩膽！"
 )
 use_dynamic_form = st.sidebar.checkbox(
     "2️⃣ 將「上仗名次與同程勝率」納入 AI 算分",
     value=False,
-    help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
+    help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓第3場6號這種反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
 )
-min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 2.5, 0.1)
-min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="⚠️ 提示：若使用【🎯 純 AI 機率最高】模式尋找熱門穩膽，建議將此數值調低至 1.0，以免錯殺優質大熱門！(位置彩池會自動將此門檻除以3)")
-max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=25.0)
-
-st.sidebar.markdown("---")
-st.sidebar.header("💰 資金管理 (凱利注碼精算)")
-total_bankroll = st.sidebar.number_input("💵 單日總本金預算 (HKD)", min_value=100, max_value=1000000, value=5000, step=500)
-kelly_fraction = st.sidebar.slider("🎛️ 凱利保守係數", 0.05, 1.0, 0.15, 0.05)
+min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 0.0, 0.1)
+min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="⚠️ 提示：若使用【🎯 純 AI 勝率最高】模式尋找熱門穩膽，建議將此數值調低至 1.0，以免錯殺優質大熱門！")
+max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=20.0)
 
 # ==========================================
-# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版 + 賽道抓取)
+# 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版)
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 歷史賽果 15 大特徵抓取器")
@@ -380,23 +343,17 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
     
     success_count = 0
     total_horses = 0
-    failed_races = []
-    no_data_races = []
-    successful_races = []
-    stopped_at_no_data = None
     
-    for race_no in range(1, 16):
+    for race_no in range(1, 13):
         status_text.text(f"正在抓取第 {race_no} 場資料...")
         url = f"https://racing.hkjc.com/racing/information/Chinese/Racing/LocalResults.aspx?RaceDate={date_str_tool}&RaceNo={race_no}"
         try:
             resp = requests.get(url, headers=headers_tool, timeout=15)
-            resp.raise_for_status()
             resp.encoding = 'utf-8' 
             html_text = resp.text
             
             if "沒有相關資料" in html_text or "No information" in html_text:
-                no_data_races.append(race_no)
-                progress_bar.progress(race_no / 15)
+                progress_bar.progress(race_no / 12)
                 continue
 
             distance = 1200
@@ -404,9 +361,6 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
             if dist_match:
                 distance = int(dist_match.group(1))
             surface_type = "草地" if "草地" in html_text else "泥地"
-            
-            track_match = re.search(r'"([A-Z0-9\+]+)"\s*賽道', html_text)
-            course_track = track_match.group(1) if track_match else ('泥地' if surface_type == '泥地' else 'A')
             
             tables = pd.read_html(StringIO(html_text))
             target_df = None
@@ -430,15 +384,8 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
                     target_df = t
                     break
                     
-            if target_df is None or target_df.empty:
-                failed_races.append((race_no, '找不到含名次／馬號／獨贏欄的結果表'))
-                progress_bar.progress(race_no / 15)
-                continue
-            added_in_this_race = 0
             if target_df is not None and not target_df.empty:
                 cols = target_df.columns.astype(str)
-                if not any('名次' in str(c) for c in cols) or not any(('馬號' in str(c) or '編號' in str(c)) for c in cols):
-                    failed_races.append((race_no, '結果表缺少名次或馬號欄'))
                 
                 rank_col = next((col for col in cols if '名次' in col), None)
                 horse_no_col = next((col for col in cols if '馬號' in col or '編號' in col), None)
@@ -477,8 +424,7 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
                                 '排位檔位': draw_pos,
                                 '獨贏賠率': odds_val,
                                 '距離': distance,                
-                                '場地': surface_type,
-                                '賽道': course_track,
+                                '場地': surface_type,            
                                 'horse_surface_win_rate': 0.08,   
                                 'horse_dist_win_rate': 0.08
                             })
@@ -486,24 +432,16 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
                     
                     if added_in_this_race > 0:
                         success_count += 1
-                        successful_races.append(race_no)
                         total_horses += added_in_this_race
             
-            if added_in_this_race == 0:
-                failed_races.append((race_no, '結果表內沒有可用馬號列'))
-            progress_bar.progress(race_no / 15)
-            time.sleep(0.5)
+            progress_bar.progress(race_no / 12)
+            time.sleep(1.0)
             
         except Exception as e:
-            failed_races.append((race_no, f'{type(e).__name__}: {e}'))
+            continue
             
     progress_bar.empty()
     status_text.empty()
-    if successful_races:
-        last_success = max(successful_races)
-        interior_gaps = [r for r in no_data_races if r < last_success]
-        if interior_gaps:
-            failed_races.extend((r, '賽事編號位於已抓取場次之前但官方頁無資料，可能資料不完整') for r in interior_gaps)
     
     if not all_races_data_tool:
         st.sidebar.error("❌ 該日期找不到任何賽事資料，或賽事已取消。")
@@ -511,87 +449,21 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
         df_tool = pd.DataFrame(all_races_data_tool)
         df_tool['獨贏賠率'] = pd.to_numeric(df_tool['獨贏賠率'], errors='coerce').fillna(0.0)
         
-        output_cols = ['馬季', '賽事編號', '名次', '馬號', '馬名', '騎師', '練馬師', '實際負磅', '排位檔位', '獨贏賠率', '距離', '場地', '賽道', 'horse_surface_win_rate', 'horse_dist_win_rate']
+        output_cols = ['馬季', '賽事編號', '名次', '馬號', '馬名', '騎師', '練馬師', '實際負磅', '排位檔位', '獨贏賠率', '距離', '場地', 'horse_surface_win_rate', 'horse_dist_win_rate']
         df_tool = df_tool[[col for col in output_cols if col in df_tool.columns]]
         
         csv_filename = f"hkjc_data_15features_{date_for_id_tool}.csv"
         csv_data = df_tool.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         
-        if failed_races:
-            st.sidebar.warning(f'⚠️ 部分抓取：成功 {success_count} 場／{total_horses} 匹；失敗場次：' + '; '.join(f'R{r} {msg}' for r, msg in failed_races) + '。下載檔會標示 PARTIAL，不可當作完整賽日資料。')
-            csv_filename = f'hkjc_data_15features_{date_for_id_tool}_PARTIAL.csv'
-        else:
-            end_race = min((r for r in no_data_races if r > max(successful_races)), default=None) if successful_races else None
-            st.sidebar.success(f'✅ 抓取完成：成功 {success_count} 場，共 {total_horses} 匹；官方頁無資料的後續場次視為賽日結束（首個空白場次：{end_race}）。')
+        st.sidebar.success(f"🎉 成功抓取 {success_count} 場，共 {total_horses} 匹真實賽果資料！")
         st.sidebar.download_button(
-            label="⬇️ 下載完賽 CSV（部分檔會標記 PARTIAL）",
+            label="⬇️ 下載產出的完賽 CSV 檔",
             data=csv_data,
             file_name=csv_filename,
             mime="text/csv",
             use_container_width=True
         )
-        # ==========================================
-# 🔄 歷史大表 CSV 一鍵合併更新工具
-# ==========================================
-st.sidebar.markdown("---")
-st.sidebar.header("🔄 歷史大表合併工具")
-st.sidebar.caption("上傳剛抓下的完賽 CSV，系統會自動與現有歷史大表合併並去除重複紀錄。")
 
-new_csv_files = st.sidebar.file_uploader(
-    "上傳新完賽 CSV (可多選)", 
-    type=['csv'], 
-    accept_multiple_files=True,
-    key="merge_csv_uploader"
-)
-
-if new_csv_files and st.sidebar.button("⚡ 合併並產出最新歷史大表", use_container_width=True):
-    hist_path = APP_DIR / 'hkjc_all_seasons_features.csv'
-    dfs_to_merge = []
-    
-    # 1. 讀取現有的歷史大表
-    if hist_path.exists():
-        try:
-            base_df = pd.read_csv(hist_path, encoding='utf-8-sig', low_memory=False)
-        except Exception:
-            base_df = pd.read_csv(hist_path, encoding='cp950', low_memory=False)
-        dfs_to_merge.append(base_df)
-        old_len = len(base_df)
-    else:
-        old_len = 0
-        st.sidebar.warning("⚠️ 找不到現有大表，將僅合併上傳的檔案。")
-        
-    # 2. 讀取所有上傳的新 CSV
-    for f in new_csv_files:
-        try:
-            sub_df = pd.read_csv(f, encoding='utf-8-sig')
-        except Exception:
-            f.seek(0)
-            sub_df = pd.read_csv(f, encoding='cp950')
-        dfs_to_merge.append(sub_df)
-        
-    if dfs_to_merge:
-        # 3. 合併、去重並按賽事編號排序
-        merged_df = pd.concat(dfs_to_merge, ignore_index=True)
-        
-        # 統一賽事編號與馬號格式，確保去重精準
-        if '賽事編號' in merged_df.columns and '馬號' in merged_df.columns:
-            merged_df['_r_key'] = merged_df['賽事編號'].astype(str).str.strip()
-            merged_df['_h_key'] = merged_df['馬號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-            merged_df = merged_df.drop_duplicates(subset=['_r_key', '_h_key'], keep='last')
-            merged_df = merged_df.sort_values(by=['_r_key']).drop(columns=['_r_key', '_h_key']).reset_index(drop=True)
-            
-        new_len = len(merged_df)
-        added_rows = new_len - old_len
-        
-        merged_bytes = merged_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.sidebar.success(f"✅ 合併完成！原 {old_len:,} 筆 ➔ 現 {new_len:,} 筆 (淨新增 {added_rows:,} 筆)")
-        st.sidebar.download_button(
-            label="⬇️ 下載最新 hkjc_all_seasons_features.csv",
-            data=merged_bytes,
-            file_name="hkjc_all_seasons_features.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
 # ==========================================
 # HKJC 新版 GraphQL：一次取得當日所有場次 WIN / PLACE 賠率
 # ==========================================
@@ -660,68 +532,6 @@ def normalize_race_id(value):
         return f"{match.group(1)}-{int(match.group(2)):02d}"
     return text
 
-
-def race_date_from_id(value):
-    match = re.search(r'(20\d{6})', str(value))
-    return match.group(1) if match else None
-
-
-def runner_is_withdrawn(row):
-    fields = []
-    for col in ('狀態', '賽事狀態', '馬匹狀態', '名次', '馬名'):
-        if col in row.index and pd.notna(row.get(col)):
-            fields.append(str(row.get(col)))
-    text = ' '.join(fields).lower()
-    return any(token in text for token in ('退出', '退賽', 'scratched', 'scratch', 'withdrawn')) or bool(re.search(r'\bwd\b', text))
-
-
-def classify_result(value):
-    text = str(value).strip().lower()
-    if not text or text in ('nan', 'none', 'nat'):
-        return 'unmatched'
-    if any(x in text for x in ('取消', 'abandoned', 'cancelled', 'canceled')):
-        return 'cancelled'
-    if any(x in text for x in ('退出', '退賽', 'scratched', 'withdrawn', 'scratch')):
-        return 'withdrawn'
-    rank_match = re.match(r'^\s*(\d+)', text.replace('名', '').replace('第', '').strip())
-    if rank_match:
-        rank = float(rank_match.group(1))
-        return 'ranked' if rank > 0 else 'unknown'
-    # 已配對但非數字的正式完賽狀態（如失去騎師、停賽、未完成）不是待開彩。
-    return 'non_numeric_result'
-
-
-def is_dead_heat(value):
-    text = str(value).lower()
-    return any(token in text for token in ('平頭', 'dead heat', 'dead-heat', 'deadheat', 'dh', 'tie'))
-
-
-def place_slots_for_field(field_size):
-    if field_size < 4:
-        return 0
-    return 2 if field_size <= 6 else 3
-
-
-def official_dividend_multiplier(row, bet_type):
-    """官方每HK$10派彩轉成每1元總回收倍數；缺官方派彩時回傳NaN。"""
-    col = '回測獨贏派彩' if bet_type == 'WIN' else '回測位置派彩'
-    value = pd.to_numeric(row.get(col, np.nan), errors='coerce')
-    return float(value) / 10.0 if pd.notna(value) and value > 0 else np.nan
-
-
-def race_can_be_settled(group):
-    if group.empty or group['_race_cancelled'].any():
-        return False
-    return bool(group['_race_complete'].all())
-
-
-def is_place_hit(row, field_size):
-    if row.get('_result_status') != 'ranked':
-        return False
-    slots = place_slots_for_field(field_size)
-    rank = pd.to_numeric(row.get('numeric_rank', np.nan), errors='coerce')
-    return slots > 0 and pd.notna(rank) and float(rank) <= slots
-
 def fetch_live_odds(date_str, venue):
     body = {
         "operationName": "racing",
@@ -747,7 +557,7 @@ def fetch_live_odds(date_str, venue):
 
         meetings = (payload.get("data") or {}).get("raceMeetings") or []
         if not meetings:
-            return None, None, "找不到該日期／場地的賽事資料（可能尚未開盤或日期錯誤）。"
+            return None, None, "找不到該日期／場地的賽事資料。"
 
         odds_by_race = {}
         timestamps = []
@@ -852,17 +662,12 @@ if auto_odds_status:
     else:
         st.sidebar.warning(auto_odds_status)
 
-# 確保賠率、賽道與跑法欄位存在
+# 確保賠率欄位存在
 if '獨贏賠率' not in df_raw.columns:
-    df_raw['獨贏賠率'] = np.nan
+    df_raw['獨贏賠率'] = 10.0
 if '位置賠率' not in df_raw.columns:
-    df_raw['位置賠率'] = np.nan
-df_raw['獨贏賠率'] = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce')
-df_raw['位置賠率'] = pd.to_numeric(df_raw['位置賠率'], errors='coerce')
-if '賽道' not in df_raw.columns:
-    df_raw['賽道'] = 'A'
-if '跑法' not in df_raw.columns:
-    df_raw['跑法'] = '居中'
+    win_values = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
+    df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
 
 # 每次切換檔案時，將版本號 +1 強制刷新表格，並初始化基準賠率
 if 'df_data' not in st.session_state or st.session_state.get('prediction_signature') != prediction_signature:
@@ -878,18 +683,12 @@ if 'df_data' not in st.session_state or st.session_state.get('prediction_signatu
     st.session_state['baseline_odds_map'] = base_map
     st.session_state['baseline_locked_time'] = "初始載入值"
 
-# 防呆機制：確保暫存資料中也包含賽道與跑法欄位，消除 KeyError
-if '賽道' not in st.session_state['df_data'].columns:
-    st.session_state['df_data']['賽道'] = 'A'
-if '跑法' not in st.session_state['df_data'].columns:
-    st.session_state['df_data']['跑法'] = '居中'
-
 # ==========================================
-# 互動式臨場賠率與跑法輸入面板
+# 互動式臨場賠率輸入面板
 # ==========================================
-st.info("👇 以下是當前載入的賽事資料。你可以點擊表格修改「跑法」與「賠率」，或透過下方的更新面板抓取即時賠率與凍結單場盤口。")
+st.info("👇 以下是當前載入的賽事資料。你可以點擊表格進行手動微調，或透過下方的更新面板抓取即時賠率與凍結單場盤口。")
 
-edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '跑法', '賽道', '獨贏賠率', '位置賠率']
+edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '獨贏賠率', '位置賠率']
 for c in edit_columns:
     if c not in st.session_state['df_data'].columns:
         st.session_state['df_data'][c] = ''
@@ -898,28 +697,19 @@ df_editable = st.session_state['df_data'][edit_columns].copy()
 editor_key = f"odds_editor_{selected_csv_name}_{st.session_state.get('odds_editor_version', 0)}"
 edited_df = st.data_editor(
     df_editable,
-    disabled=['賽事編號', '馬號', '馬名', '排位檔位', '賽道'],
-    column_config={
-        "跑法": st.column_config.SelectboxColumn("跑法", options=["放頭", "跟前", "居中", "後上"], required=True)
-    },
+    disabled=['賽事編號', '馬號', '馬名', '排位檔位'], 
     use_container_width=True,
     hide_index=True,
     key=editor_key
 )
 
-# 同步手動修改的賠率與跑法回 session_state['df_data']
-st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce')
-st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce')
-st.session_state['df_data']['跑法'] = edited_df['跑法']
+# 同步手動修改的賠率回 session_state['df_data']
+st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
+st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.5)
 
 df = st.session_state['df_data'].copy()
-required_prediction_fields = ['賽事編號', '馬號', '馬名', '騎師', '練馬師', '排位檔位', '實際負磅', '距離', '場地']
-missing_prediction_fields = [c for c in required_prediction_fields if c not in df.columns]
-if missing_prediction_fields:
-    st.error(f'預測賽卡缺少必要欄位：{missing_prediction_fields}；不會使用猜測值生成預測。')
-    st.stop()
 
-# 側邊欄提供隨時下載「包含目前已凍結買時賠率與跑法」的完整賽卡快照
+# 側邊欄提供隨時下載「包含目前已凍結買時賠率」的完整賽卡快照
 sample_id_for_dl = str(df['賽事編號'].iloc[0]).strip() if len(df) else ""
 dl_date_match = re.search(r"(20\d{6})", sample_id_for_dl)
 dl_date_tag = dl_date_match.group(1) if dl_date_match else datetime.now(hk_timezone).strftime("%Y%m%d")
@@ -930,7 +720,7 @@ st.sidebar.download_button(
     file_name=f'prediction_{dl_date_tag}.csv',
     mime='text/csv',
     use_container_width=True,
-    help='將目前畫面上的賠率與設定（包含你逐場凍結的買時賠率與跑法）完整打包下載，放到 GitHub 即可隨時重現 100% 真實買時回測！'
+    help='將目前畫面上的賠率（包含你逐場凍結的買時賠率）完整打包下載，放到 GitHub 即可隨時重現 100% 真實買時回測！'
 )
 
 # === 計算早盤 vs 臨場賠率變動 (落飛追蹤) ===
@@ -953,234 +743,120 @@ def get_odds_move_badge(pct):
 
 df['資金流向'] = df['odds_drop_pct'].map(get_odds_move_badge)
 
-# 1. 特徵工程：不補造盤口；任一未退出馬匹欠有效WIN價，該場停止AI/EV/注碼計算。
-df['獨贏賠率'] = pd.to_numeric(df['獨贏賠率'], errors='coerce')
-df['位置賠率'] = pd.to_numeric(df['位置賠率'], errors='coerce')
-df['_is_withdrawn'] = df.apply(runner_is_withdrawn, axis=1)
-active_mask = ~df['_is_withdrawn']
-valid_win = df['獨贏賠率'].gt(1.0) & df['獨贏賠率'].notna()
-df['market_prob'] = np.where(active_mask & valid_win, 1.0 / df['獨贏賠率'], np.nan)
+# 1. 特徵工程
+df['market_prob'] = 1 / df['獨贏賠率']
 prob_sum = df.groupby('賽事編號')['market_prob'].transform('sum')
 df['market_implied_prob'] = df['market_prob'] / prob_sum
+
 df['odds_rank'] = df.groupby('賽事編號')['獨贏賠率'].rank(method='min')
 df['is_favorite'] = (df['odds_rank'] == 1).astype(int)
 df['排位檔位'] = pd.to_numeric(df['排位檔位'], errors='coerce').fillna(7)
+
 if '實際負磅' in df.columns:
-    df['實際負磅'] = pd.to_numeric(df['實際負磅'], errors='coerce')
+    df['實際負磅'] = pd.to_numeric(df['實際負磅'], errors='coerce').fillna(120)
     avg_weight = df.groupby('賽事編號')['實際負磅'].transform('mean')
     df['weight_diff'] = df['實際負磅'] - avg_weight
     df['weight_rank'] = df.groupby('賽事編號')['實際負磅'].rank(ascending=False, method='min')
 else:
-    df['weight_diff'] = np.nan
-    df['weight_rank'] = np.nan
-rank_source = df['名次'] if '名次' in df.columns else pd.Series(np.nan, index=df.index)
-df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce')
+    df['weight_diff'] = 0.0
+    df['weight_rank'] = 6.0
+
+rank_source = df['名次'] if '名次' in df.columns else pd.Series(99, index=df.index)
+df['numeric_rank'] = pd.to_numeric(rank_source, errors='coerce').fillna(99)
+
 if '距離' not in df.columns:
-    df['距離'] = np.nan
-df['距離'] = pd.to_numeric(df['距離'], errors='coerce')
+    df['距離'] = 1200
+df['距離'] = pd.to_numeric(df['距離'], errors='coerce').fillna(1200).astype(int)
+
 if '場地' not in df.columns:
-    df['場地'] = ''
+    df['場地'] = '草地'
 
-# 每個預測賽日分開重算，只用該日之前的歷史；日期不明即停止，不退回全歷史。
-history_path = APP_DIR / 'hkjc_all_seasons_features.csv'
-if not history_path.is_file():
-    st.error(f'找不到歷史資料 {history_path.name}；為避免用常數假裝正常預測，已停止推論。')
-    st.stop()
-history_signature = f'{history_path.stat().st_mtime_ns}:{history_path.stat().st_size}'
-df['_prediction_date'] = df['賽事編號'].map(race_date_from_id)
-if df['_prediction_date'].isna().any():
-    st.error('部分賽事編號沒有可解析的YYYYMMDD日期；無法安全截斷歷史資料，已停止推論。')
-    st.stop()
-enriched_parts = []
-for target_date, target_rows in df.groupby('_prediction_date', sort=False):
-    clean_target_date = re.sub(r'\D', '', str(target_date))[:8] if 'target_date' in locals() else "99999999"
-    hist_stats = load_historical_stats(cutoff_date_str=clean_target_date, history_csv_path='hkjc_all_seasons_features.csv')
-    if hist_stats is None:
-        st.error(f'{target_date}之前沒有可用且日期可解析的歷史賽果；該日不會使用全歷史或預設值預測。')
-        st.stop()
-    (jockey_stats, trainer_stats, horse_stats, combo_stats,
-     horse_last_rank_stats, horse_surface_stats, horse_dist_stats) = hist_stats
-    part = target_rows.copy()
-    part['_clean_jockey'] = part['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
-    part['_clean_trainer'] = part['練馬師'].astype(str).str.replace(' ', '')
-    part['_clean_horse'] = part['馬名'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
-    part['_clean_surface'] = part['場地'].astype(str).str.strip()
-    part['_clean_dist'] = pd.to_numeric(part['距離'], errors='coerce')
-    part = part.merge(jockey_stats, on='_clean_jockey', how='left')
-    part = part.merge(trainer_stats, on='_clean_trainer', how='left')
-    part = part.merge(horse_stats, on='_clean_horse', how='left')
-    part = part.merge(combo_stats, on=['_clean_jockey', '_clean_trainer'], how='left')
-    part = part.merge(horse_last_rank_stats, on='_clean_horse', how='left')
-    part = part.merge(horse_surface_stats, on=['_clean_horse', '_clean_surface'], how='left')
-    part = part.merge(horse_dist_stats, on=['_clean_horse', '_clean_dist'], how='left')
-    part['jockey_win_rate'] = part['hist_jockey_win_rate'].fillna(0.08)
-    part['trainer_win_rate'] = part['hist_trainer_win_rate'].fillna(0.08)
-    part['horse_win_rate'] = part['hist_horse_win_rate'].fillna(0.05)
-    part['combo_win_rate'] = part['hist_combo_win_rate'].fillna(0.05)
-    part['recent_jockey_win_rate'] = part['recent_jockey_win_rate'].fillna(part['jockey_win_rate'])
-    part['recent_trainer_win_rate'] = part['recent_trainer_win_rate'].fillna(part['trainer_win_rate'])
-    part['real_last_rank'] = part['hist_horse_last_rank'].fillna(6.5)
-    part['real_surface_win_rate'] = part['hist_horse_surface_win_rate'].fillna(part['horse_win_rate'])
-    part['real_dist_win_rate'] = part['hist_horse_dist_win_rate'].fillna(part['horse_win_rate'])
+# === 補全真實歷史數據 (視覺與算分雙軌設計) ===
+hist_stats = load_historical_stats()
+if hist_stats is not None:
+    (
+        jockey_stats, trainer_stats, horse_stats, combo_stats,
+        horse_last_rank_stats, horse_surface_stats, horse_dist_stats
+    ) = hist_stats
+    
+    df['_clean_jockey'] = df['騎師'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
+    df['_clean_trainer'] = df['練馬師'].astype(str).str.replace(' ', '')
+    df['_clean_horse'] = df['馬名'].astype(str).str.replace(r'\(.*?\)', '', regex=True).str.replace(' ', '')
+    df['_clean_surface'] = df['場地'].astype(str).str.strip()
+    df['_clean_dist'] = df['距離'].astype(int)
+    
+    df = df.merge(jockey_stats, on='_clean_jockey', how='left')
+    df = df.merge(trainer_stats, on='_clean_trainer', how='left')
+    df = df.merge(horse_stats, on='_clean_horse', how='left')
+    df = df.merge(combo_stats, on=['_clean_jockey', '_clean_trainer'], how='left')
+    df = df.merge(horse_last_rank_stats, on='_clean_horse', how='left')
+    df = df.merge(horse_surface_stats, on=['_clean_horse', '_clean_surface'], how='left')
+    df = df.merge(horse_dist_stats, on=['_clean_horse', '_clean_dist'], how='left')
+    
+    df['jockey_win_rate'] = df['hist_jockey_win_rate'].fillna(0.08)
+    df['trainer_win_rate'] = df['hist_trainer_win_rate'].fillna(0.08)
+    df['horse_win_rate'] = df['hist_horse_win_rate'].fillna(0.05)
+    df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
+    
+    # 儲存真實近況與路程數據供畫面表格顯示 (不受算分開關影響)
+    df['real_last_rank'] = df['hist_horse_last_rank'].fillna(6.5)
+    df['real_surface_win_rate'] = df['hist_horse_surface_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    df['real_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
+    
+    # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
     if use_dynamic_form:
-        part['horse_last_rank'] = part['real_last_rank']
-        part['horse_surface_win_rate'] = part['real_surface_win_rate']
-        part['horse_dist_win_rate'] = part['real_dist_win_rate']
+        df['horse_last_rank'] = df['real_last_rank']
+        df['horse_surface_win_rate'] = df['real_surface_win_rate']
+        df['horse_dist_win_rate'] = df['real_dist_win_rate']
     else:
-        part['horse_last_rank'] = 6.0
-        part['horse_surface_win_rate'] = 0.08
-        part['horse_dist_win_rate'] = 0.08
-    part.drop(columns=['_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
+        # 1004 爆冷模式：維持模型訓練時習慣的固定常數，不因上仗落敗而扣掉黑馬分數！
+        df['horse_last_rank'] = 6.0
+        df['horse_surface_win_rate'] = 0.08
+        df['horse_dist_win_rate'] = 0.08
+    
+    df.drop(columns=[
+        '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
         'hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate',
-        'hist_horse_last_rank', 'hist_horse_surface_win_rate', 'hist_horse_dist_win_rate'], inplace=True, errors='ignore')
-    enriched_parts.append(part)
-df = pd.concat(enriched_parts).sort_index()
-df.drop(columns=['_prediction_date'], inplace=True, errors='ignore')
+        'hist_horse_last_rank', 'hist_horse_surface_win_rate', 'hist_horse_dist_win_rate'
+    ], inplace=True, errors='ignore')
+else:
+    st.sidebar.error("❌ 未能讀取歷史大表，目前正在使用預設值！")
+    df['jockey_win_rate'] = df.get('jockey_win_rate', 0.08)
+    df['trainer_win_rate'] = df.get('trainer_win_rate', 0.08)
+    df['combo_win_rate'] = df.get('combo_win_rate', 0.05)
+    df['horse_win_rate'] = df.get('horse_win_rate', 0.05)
+    df['real_last_rank'] = 6.5
+    df['real_surface_win_rate'] = 0.08
+    df['real_dist_win_rate'] = 0.08
+    df['horse_last_rank'] = 6.0
+    df['horse_surface_win_rate'] = 0.08
+    df['horse_dist_win_rate'] = 0.08
 
-# 同場全部有效參賽馬均有WIN盤才預測；退賽馬排除且不要求賠率。
-df['_is_withdrawn'] = df.apply(runner_is_withdrawn, axis=1)
-df['_active_win_valid'] = (~df['_is_withdrawn']) & df['獨贏賠率'].gt(1.0)
-# 對含退出馬的賽事，只要求其餘有效馬有價；分組判斷另行計數。
-race_ready = {}
-for rid, grp in df.groupby('賽事編號'):
-    active = grp[~grp['_is_withdrawn']]
-    race_ready[rid] = (not active.empty) and active['獨贏賠率'].gt(1.0).all()
-df['_race_win_ready'] = df['賽事編號'].map(race_ready).fillna(False)
-missing_races = [str(rid) for rid, ok in race_ready.items() if not ok]
-if missing_races:
-    st.warning('以下場次至少一匹未退出馬缺少有效獨贏賠率，該場不產生AI勝率、EV或注碼：' + ', '.join(missing_races))
-
-# 🚀 2. 雙渦輪引擎同時預測 (Win Engine + Place Engine)
+# 2. 提取 15 大特徵並預測勝率與 EV
 feature_cols = FEATURE_COLS_15
+
 for col in feature_cols:
     if col not in df.columns:
-        df[col] = np.nan
-df['pred_win_prob'] = np.nan
-df['pred_place_prob'] = np.nan
-ready_mask = df['_race_win_ready'] & ~df['_is_withdrawn']
-if ready_mask.any():
-    X_predict = df.loc[ready_mask, feature_cols].apply(pd.to_numeric, errors='coerce')
-    if X_predict.isna().any().any():
-        missing_features = X_predict.columns[X_predict.isna().any()].tolist()
-        st.error(f'模型特徵仍有缺值：{missing_features}；不會以0補值掩蓋資料問題。')
-        st.stop()
-    df.loc[ready_mask, 'pred_win_prob'] = model_win.predict_proba(X_predict)[:, 1]
-    if model_place is not None:
-        df.loc[ready_mask, 'pred_place_prob'] = model_place.predict_proba(X_predict)[:, 1]
-    else:
-        df.loc[ready_mask, 'pred_place_prob'] = df.loc[ready_mask, 'pred_win_prob']
-df['win_ev'] = np.where(df['獨贏賠率'].gt(1.0), df['pred_win_prob'] * df['獨贏賠率'], np.nan)
-df['place_ev'] = np.where(df['位置賠率'].gt(1.0), df['pred_place_prob'] * df['位置賠率'], np.nan)
-df['ev'] = df['win_ev']
+        df[col] = 0.0
 
-# 🚀 3. 計算賽道移欄與檔位偏差懲罰
-def calculate_track_bias(row):
-    penalty = 0.0
-    if row['場地'] == '草地':
-        draw = int(row['排位檔位'])
-        track = str(row.get('賽道', 'A')).upper()
-        dist = int(row['距離'])
-        rc = str(row.get('racecourse_code', 'ST'))
-        if track in ['C', 'C+3', 'B+2', 'C+2']:
-            if draw >= 11: penalty = -0.15
-            elif draw >= 9: penalty = -0.05
-        if rc == 'ST' and dist == 1000:
-            if draw >= 10: penalty = +0.10
-            elif draw <= 4: penalty = -0.10
-    return penalty
-df['track_bias_adj'] = df.apply(calculate_track_bias, axis=1)
+X_predict = df[feature_cols].fillna(0)
+df['pred_win_prob'] = model.predict_proba(X_predict)[:, 1]
+df['ev'] = df['pred_win_prob'] * df['獨贏賠率']
 
-# 🚀 4. 計算近期手風 (Hot Hand) 戰術加成
-def calculate_hot_hand_adj(row):
-    adj = 0.0
-    j_diff = row['recent_jockey_win_rate'] - row['jockey_win_rate']
-    t_diff = row['recent_trainer_win_rate'] - row['trainer_win_rate']
-    if j_diff >= 0.04: adj += 0.05
-    elif j_diff <= -0.04: adj -= 0.05
-    if t_diff >= 0.04: adj += 0.05
-    elif t_diff <= -0.04: adj -= 0.05
-    return adj
-df['hot_hand_adj'] = df.apply(calculate_hot_hand_adj, axis=1)
-
-# 🚀 5. 計算預期步速 (Pace Scenario) 戰術加成
-def calculate_pace_adj(df_in):
-    df_in['pace_adj'] = 0.0
-    df_in['race_pace'] = '🐎 正常'
-    for race_id, group in df_in.groupby('賽事編號'):
-        front_runners = sum(group['跑法'] == '放頭')
-        if front_runners >= 3:
-            pace = "fast"
-            pace_label = '🔥 快步速'
-        elif front_runners <= 1:
-            pace = "slow"
-            pace_label = '🐢 慢步速'
-        else:
-            pace = "normal"
-            pace_label = '🐎 正常'
-            
-        for idx, row in group.iterrows():
-            style = row['跑法']
-            adj = 0.0
-            if pace == "fast":
-                if style == '後上': adj = 0.08
-                elif style == '放頭': adj = -0.06
-            elif pace == "slow":
-                if style == '放頭': adj = 0.08
-                elif style == '後上': adj = -0.05
-            df_in.at[idx, 'pace_adj'] = adj
-            df_in.at[idx, 'race_pace'] = pace_label
-    return df_in
-df = calculate_pace_adj(df)
-
-# 6. 計算雙引擎「抗噪穩定綜合分數」 (結合落飛資金 + 賽道偏差 + 騎練手風 + 預期步速)
+# 3. 計算「抗噪穩定分數」
 drop_bonus = np.clip(df['odds_drop_pct'] / 100.0, -0.35, 0.30)
-total_tactical_adj = 1.0 + drop_bonus + df['track_bias_adj'] + df['hot_hand_adj'] + df['pace_adj']
-df['smart_score_win'] = df['pred_win_prob'] * total_tactical_adj
-df['smart_score_place'] = df['pred_place_prob'] * total_tactical_adj
-df['smart_score'] = df['smart_score_win']
+df['smart_score'] = df['pred_win_prob'] * (1.0 + drop_bonus)
 
-# 💰 7. 雙重凱利注碼精算 (獨贏注碼 & 位置注碼)
-safe_win_odds = pd.to_numeric(df['獨贏賠率'], errors='coerce').clip(lower=1.01)
-df['kelly_pct_win'] = np.clip((df['win_ev'] - 1.0) / (safe_win_odds - 1.0), 0.0, 1.0)
-df['suggested_stake_win'] = np.floor((total_bankroll * df['kelly_pct_win'] * kelly_fraction) / 10) * 10
-df['suggested_stake'] = df['suggested_stake_win']
-
-safe_place_odds = pd.to_numeric(df['位置賠率'], errors='coerce').clip(lower=1.01)
-df['kelly_pct_place'] = np.clip((df['place_ev'] - 1.0) / (safe_place_odds - 1.0), 0.0, 1.0)
-df['suggested_stake_place'] = np.floor((total_bankroll * df['kelly_pct_place'] * kelly_fraction) / 10) * 10
-
-# 🚀 核心雙軌過濾與排序邏輯 (支援 bet_type 分流)
-# 🚀 核心雙軌過濾與排序邏輯 (加入 18% 獨贏與 40% 位置實力底線保護傘)
-def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val, bet_type="win"):
-    if bet_type == "win":
-        cond = (
-            (group['win_ev'] >= min_ev_val) & 
-            (group['獨贏賠率'] >= min_odds_val) & 
-            (group['獨贏賠率'] <= max_odds_val) &
-            (group['pred_win_prob'] >= 0.18)  # 🔥 實力底線：AI 獨贏勝率至少要 18%
-        )
-        if mode.startswith("🛡️"):
-            cond = cond & (group['odds_drop_pct'] > -25.0)
-            sort_col = 'smart_score_win'
-        elif mode.startswith("🎯"):
-            sort_col = 'pred_win_prob'
-        else:
-            sort_col = 'win_ev'
+# 🚀 核心過濾與排序邏輯 (加入純勝率模式)
+def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val):
+    cond = (group['ev'] >= min_ev_val) & (group['獨贏賠率'] >= min_odds_val) & (group['獨贏賠率'] <= max_odds_val)
+    if mode.startswith("🛡️"):
+        cond = cond & (group['odds_drop_pct'] > -25.0)
+        sort_col = 'smart_score'
+    elif mode.startswith("🎯"):
+        sort_col = 'pred_win_prob'
     else:
-        min_pla_odds = max(1.01, min_odds_val / 3.0)
-        cond = (
-            (group['place_ev'] >= min_ev_val) & 
-            (group['位置賠率'] >= min_pla_odds) &
-            (group['pred_place_prob'] >= 0.40) # 🔥 實力底線：AI 位置入位率至少要 40%
-        )
-        if mode.startswith("🛡️"):
-            cond = cond & (group['odds_drop_pct'] > -25.0)
-            sort_col = 'smart_score_place'
-        elif mode.startswith("🎯"):
-            sort_col = 'pred_place_prob'
-        else:
-            sort_col = 'place_ev'
-            
+        sort_col = 'ev'
     return group[cond].sort_values(by=sort_col, ascending=False).reset_index(drop=True)
 
 # 回測使用手動上傳的完賽資料
@@ -1204,53 +880,32 @@ if backtest_file is not None:
             result_map['_race_key'] = result_map['賽事編號'].map(normalize_race_id)
             result_map['_horse_key'] = result_map['馬號'].map(normalize_horse_no)
             rename_map = {'名次': '_result_rank'}
-            for source, target in [('獨贏賠率', '_result_win_odds'), ('位置賠率', '_result_place_odds')]:
-                if source in result_map.columns:
-                    rename_map[source] = target
-            # 只將明確標示為派彩的欄位視作官方每HK$10派彩。
-            low_cols = {str(c).lower().replace(' ', ''): c for c in result_map.columns}
-            for candidates, target in [
-                (('獨贏派彩', 'win派彩', 'win_dividend', 'windividend', 'win(dividend)'), '_result_win_dividend'),
-                (('位置派彩', 'place派彩', 'pla派彩', 'place_dividend', 'placedividend'), '_result_place_dividend')]:
-                src_col = next((orig for low, orig in low_cols.items() if any(key in low for key in candidates)), None)
-                if src_col:
-                    rename_map[src_col] = target
-            status_candidates = [c for c in result_map.columns if any(x in str(c).lower() for x in ('狀態', 'status', 'result'))]
-            if status_candidates:
-                rename_map[status_candidates[0]] = '_result_extra_status'
+            if '獨贏賠率' in result_map.columns:
+                rename_map['獨贏賠率'] = '_result_win_odds'
+            if '位置賠率' in result_map.columns:
+                rename_map['位置賠率'] = '_result_place_odds'
             result_map = result_map.drop_duplicates(['_race_key', '_horse_key'], keep='last')
             result_map = result_map[['_race_key', '_horse_key'] + [c for c in rename_map if c in result_map.columns]]
             result_map = result_map.rename(columns=rename_map)
+
             df_backtest['_race_key'] = df_backtest['賽事編號'].map(normalize_race_id)
             df_backtest['_horse_key'] = df_backtest['馬號'].map(normalize_horse_no)
-            df_backtest = df_backtest.merge(result_map, on=['_race_key', '_horse_key'], how='left', validate='many_to_one', indicator='_result_match')
+            df_backtest = df_backtest.merge(
+                result_map, on=['_race_key', '_horse_key'], how='left', validate='many_to_one', indicator='_result_match'
+            )
             df_backtest['名次'] = df_backtest['_result_rank']
-            df_backtest['numeric_rank'] = pd.to_numeric(df_backtest['名次'], errors='coerce')
-            rank_prefix = df_backtest['名次'].astype(str).str.extract(r'^\s*(\d+)', expand=False)
-            df_backtest['numeric_rank'] = df_backtest['numeric_rank'].fillna(pd.to_numeric(rank_prefix, errors='coerce'))
-            df_backtest['_result_status'] = df_backtest['_result_rank'].map(classify_result)
-            # 若結果檔提供獨立狀態，以其優先識別退出或取消。
-            if '_result_extra_status' in df_backtest.columns:
-                extra = df_backtest['_result_extra_status'].fillna('').astype(str)
-                extra_status = extra.map(classify_result)
-                df_backtest.loc[extra_status.isin(['withdrawn', 'cancelled']), '_result_status'] = extra_status[extra_status.isin(['withdrawn', 'cancelled'])]
-            df_backtest.loc[df_backtest['_result_match'].eq('left_only'), '_result_status'] = 'unmatched'
-            df_backtest['_race_cancelled'] = df_backtest.groupby('_race_key')['_result_status'].transform(lambda x: x.eq('cancelled').any())
-            # 每場完整性：未配對的非退出馬使整場不參與ROI，避免只按已知賽果重新挑馬。
-            predicted_scratch = df_backtest.apply(runner_is_withdrawn, axis=1)
-            df_backtest['_predicted_withdrawn'] = predicted_scratch
-            df_backtest['_row_result_acceptable'] = df_backtest['_result_match'].eq('both') | predicted_scratch
-            df_backtest['_race_complete'] = df_backtest.groupby('_race_key')['_row_result_acceptable'].transform('all')
-            for source, target in [('_result_win_odds', '回測獨贏賠率'), ('_result_place_odds', '回測位置賠率'), ('_result_win_dividend', '回測獨贏派彩'), ('_result_place_dividend', '回測位置派彩')]:
-                if source in df_backtest.columns:
-                    df_backtest[target] = pd.to_numeric(df_backtest[source].astype(str).str.replace(r'[$, ]', '', regex=True), errors='coerce')
-            matched = int((df_backtest['_result_match'].eq('both') & df_backtest['_result_status'].ne('unmatched')).sum())
+            df_backtest['numeric_rank'] = pd.to_numeric(df_backtest['名次'], errors='coerce').fillna(99)
+            if '_result_win_odds' in df_backtest.columns:
+                df_backtest['回測獨贏賠率'] = pd.to_numeric(df_backtest['_result_win_odds'], errors='coerce')
+            if '_result_place_odds' in df_backtest.columns:
+                df_backtest['回測位置賠率'] = pd.to_numeric(df_backtest['_result_place_odds'], errors='coerce')
+            has_official_result = df_backtest['_result_match'].eq('both') & df_backtest['_result_rank'].notna()
+            matched = int(has_official_result.sum())
             backtest_ready = matched > 0
             if backtest_ready:
-                incomplete = int(df_backtest.groupby('_race_key')['_race_complete'].first().eq(False).sum())
-                st.sidebar.success(f'✅ {result_source_label}已配對：{matched} 匹；不完整場次 {incomplete} 場會整場略過，不會事後改選次選。')
+                st.sidebar.success(f"{result_source_label}已配對：{matched} 匹")
             else:
-                st.sidebar.warning('未能按賽事編號＋馬號配對到官方名次。')
+                st.sidebar.warning("未能按賽事編號＋馬號配對到名次。")
     except Exception as exc:
         st.sidebar.error(f"讀取回測 CSV 失敗：{type(exc).__name__}: {exc}")
 
@@ -1382,12 +1037,10 @@ with tab1:
         st.session_state['baseline_locked_time'] = datetime.now(hk_timezone).strftime("%H:%M:%S")
         st.rerun()
 
-    refresh_count = None
     if auto_refresh:
-        refresh_count = st_autorefresh(interval=int(refresh_seconds * 1000), key=f"hkjc_live_odds_autorefresh_{api_date}_{venue_code}")
-    timer_key = f'{api_date}:{venue_code}:{refresh_seconds}'
-    should_auto_fetch = bool(auto_refresh and refresh_count is not None and st.session_state.get('odds_last_timer_key') != timer_key + ':' + str(refresh_count))
-    if manual_refresh or should_auto_fetch:
+        st_autorefresh(interval=int(refresh_seconds * 1000), key="hkjc_live_odds_autorefresh")
+
+    if auto_refresh or manual_refresh:
         with st.spinner("正在讀取當日 WIN／PLACE 即時賠率（自動跳過已凍結場次）…"):
             live_by_race, server_updated_at, error = fetch_live_odds(api_date, venue_code)
 
@@ -1423,23 +1076,16 @@ with tab1:
             st.session_state['df_data'] = df_temp
             st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
             skip_msg = f"（已保護跳過凍結場次：{', '.join(skipped_frozen)}）" if skipped_frozen else ""
-            st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
+            st.session_state['odds_last_status'] = f"成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
             st.session_state['odds_server_time'] = server_updated_at
             st.session_state['odds_last_error'] = None
-            if auto_refresh and refresh_count is not None:
-                st.session_state['odds_last_timer_key'] = timer_key + ':' + str(refresh_count)
             st.rerun()
         else:
-            st.session_state['odds_last_error'] = f"⚠️ 無法取得賠率：{error}"
-            st.session_state['odds_last_status'] = None
-            if auto_refresh and refresh_count is not None:
-                st.session_state['odds_last_timer_key'] = timer_key + ':' + str(refresh_count)
-            st.rerun()
+            st.session_state['odds_last_error'] = error
 
     locked_time_str = st.session_state.get('baseline_locked_time', '未鎖定')
     form_mode_str = "🔥 真實近況與同程算分" if use_dynamic_form else "🎯 1004 爆冷模式 (固定常數算分)"
-    engine_str = "雙渦輪 (Win + Place 獨立模型)" if model_place is not None else "單引擎 (僅獨贏模型)"
-    st.caption(f"📌 早盤基準：`{locked_time_str}` ｜ 排序：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}` ｜ 模型：`{engine_str}`")
+    st.caption(f"📌 早盤基準：`{locked_time_str}` ｜ 排序：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}`")
 
     if st.session_state.get('odds_last_error'):
         st.warning(st.session_state['odds_last_error'])
@@ -1447,63 +1093,43 @@ with tab1:
         st.success(st.session_state['odds_last_status'])
 
     st.markdown("---")
-    st.subheader("🎯 各場次 AI 雙渦輪智慧投注推薦清單")
+    st.subheader("🎯 各場次 AI 智慧投注推薦清單")
 
     recommendations = []
     for race_id, group in df.groupby('賽事編號'):
         r_no = extract_race_no(race_id)
         freeze_badge = f"🔒 已凍結 ({st.session_state['frozen_races'][r_no]})" if r_no in st.session_state['frozen_races'] else "🟢 即時跳動中"
-        
-        # 獨贏引擎篩選 與 位置引擎篩選
-        sorted_win = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="win")
-        sorted_place = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+        sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds)
 
-        win_pick = "⚠️ 無達標獨贏馬"
-        hot_str = "-"
-        if len(sorted_win) >= 1:
-            top1 = sorted_win.iloc[0]
+        if len(sorted_group) >= 1:
+            top1 = sorted_group.iloc[0]
             last_r_str = f"上仗:{int(top1['real_last_rank'])}" if top1['real_last_rank'] != 6.5 else "上仗:新馬/無"
-            j_hot = "🔥" if (top1['recent_jockey_win_rate'] - top1['jockey_win_rate']) >= 0.04 else ""
-            t_hot = "🔥" if (top1['recent_trainer_win_rate'] - top1['trainer_win_rate']) >= 0.04 else ""
-            hot_str = f"{top1['騎師']}{j_hot} / {top1['練馬師']}{t_hot}"
             win_pick = (
                 f"馬號 {top1['馬號']} ({top1['馬名']}) "
-                f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | 獨EV:{top1['win_ev']:.2f}] "
-                f"💰${top1['suggested_stake_win']:.0f} {top1['資金流向']}"
+                f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | EV:{top1['ev']:.2f}] "
+                f"{top1['資金流向']}"
             )
             
-        if len(sorted_place) >= 2:
-            p1 = sorted_place.iloc[0]
-            p2 = sorted_place.iloc[1]
-            q_pick = f"{p1['馬號']} + {p2['馬號']} ({p1['馬名']} / {p2['馬名']}) [入位率:{p1['pred_place_prob']*100:.0f}% & {p2['pred_place_prob']*100:.0f}%]"
-            if len(sorted_place) >= 3:
-                p3 = sorted_place.iloc[2]
-                qp_pick = f"{p1['馬號']} + {p2['馬號']} 或 {p1['馬號']} + {p3['馬號']}"
+            if len(sorted_group) >= 2:
+                top2 = sorted_group.iloc[1]
+                q_pick = f"{top1['馬號']} + {top2['馬號']} ({top1['馬名']} / {top2['馬名']})"
             else:
-                qp_pick = f"{p1['馬號']} + {p2['馬號']} (僅一注 QP)"
-        elif len(sorted_place) == 1:
-            p1 = sorted_place.iloc[0]
-            q_pick = f"單膽位置: {p1['馬號']} ({p1['馬名']}) [位EV:{p1['place_ev']:.2f}] 💰${p1['suggested_stake_place']:.0f}"
-            qp_pick = "⚠️ 僅一匹位置達標 (不推薦 QP)"
-        else:
-            q_pick = "⚠️ 無達標位置馬"
-            qp_pick = "⚠️ 無達標位置馬"
-
-        if len(sorted_win) >= 1 or len(sorted_place) >= 1:
-            ref_row = sorted_win.iloc[0] if len(sorted_win) >= 1 else sorted_place.iloc[0]
-            if hot_str == "-":
-                j_hot = "🔥" if (ref_row['recent_jockey_win_rate'] - ref_row['jockey_win_rate']) >= 0.04 else ""
-                t_hot = "🔥" if (ref_row['recent_trainer_win_rate'] - ref_row['trainer_win_rate']) >= 0.04 else ""
-                hot_str = f"{ref_row['騎師']}{j_hot} / {ref_row['練馬師']}{t_hot}"
+                q_pick = "⚠️ 僅一匹達標 (不推薦 Q)"
                 
+            if len(sorted_group) >= 3:
+                top3 = sorted_group.iloc[2]
+                qp_pick = f"{top1['馬號']} + {top2['馬號']} 或 {top1['馬號']} + {top3['馬號']}"
+            elif len(sorted_group) == 2:
+                qp_pick = f"{top1['馬號']} + {top2['馬號']} (僅一注 QP)"
+            else:
+                qp_pick = "⚠️ 僅一匹達標 (不推薦 QP)"
+
             recommendations.append({
                 '賽事編號': race_id,
-                '賽道': ref_row.get('賽道', 'A'),
                 '盤口狀態': freeze_badge,
-                '🎯 獨贏首選 (Win Engine)': win_pick,
-                '近況手風': hot_str,
-                '🥉 位置/連贏推薦 (Place Engine)': q_pick,
-                '🔗 位置Q推薦 (Place Engine)': qp_pick
+                '🎯 獨贏首選 (含近況與資金流向)': win_pick,
+                '🔗 連贏推薦 (Q)': q_pick,
+                '🔗 位置Q推薦 (QP)': qp_pick
             })
 
     rec_df = pd.DataFrame(recommendations)
@@ -1512,43 +1138,33 @@ with tab1:
     else:
         st.dataframe(rec_df, use_container_width=True, hide_index=True)
 
-    # 單場深度資金與實力雷達表 (同時顯示雙模型機率與雙 EV)
+    # 單場深度資金與實力雷達表
     status_tag = f"🔒 已凍結於 {st.session_state['frozen_races'][int(target_race)]}" if is_target_frozen else "🟢 盤口即時更新中"
+    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與 AI 實力深度雷達 ({status_tag})")
     race_detail_df = df[df['賽事編號'].map(extract_race_no) == target_race].copy()
-    current_pace_label = race_detail_df['race_pace'].iloc[0] if not race_detail_df.empty else "未知"
-    
-    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與雙模型實力深度雷達 ({status_tag} ｜ 預期步速: {current_pace_label})")
     if not race_detail_df.empty:
         if strategy_mode.startswith("🛡️"):
-            sort_col_detail = 'smart_score_win'
+            sort_col_detail = 'smart_score'
         elif strategy_mode.startswith("🎯"):
             sort_col_detail = 'pred_win_prob'
         else:
-            sort_col_detail = 'win_ev'
+            sort_col_detail = 'ev'
             
         race_detail_df = race_detail_df.sort_values(by=sort_col_detail, ascending=False).reset_index(drop=True)
         display_detail = pd.DataFrame({
             '馬號': race_detail_df['馬號'],
             '馬名': race_detail_df['馬名'],
-            '騎師(近50場)': race_detail_df['騎師'] + " (" + (race_detail_df['recent_jockey_win_rate'] * 100).round(1).astype(str) + "%)",
+            '騎師': race_detail_df['騎師'],
             '練馬師': race_detail_df['練馬師'],
             '檔位': race_detail_df['排位檔位'],
-            '跑法': race_detail_df['跑法'],
-            '步速加成': race_detail_df['pace_adj'].map(lambda x: f"{x*100:+.0f}%" if x != 0 else "-"),
-            '檔位調整': race_detail_df.apply(lambda r: "泥地無移欄" if r.get('場地') == '泥地' else (f"{r['track_bias_adj']*100:+.0f}%" if r['track_bias_adj'] != 0 else "內檔安全"), axis=1),
             '上仗名次': race_detail_df['real_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
             '同程勝率': (race_detail_df['real_dist_win_rate'] * 100).round(1).astype(str) + '%',
             'AI 勝率': (race_detail_df['pred_win_prob'] * 100).round(1).astype(str) + '%',
-            'AI 入位率': (race_detail_df['pred_place_prob'] * 100).round(1).astype(str) + '%',
-            '基準獨贏': race_detail_df['基準賠率'].round(1),
-            '最新獨贏': race_detail_df['獨贏賠率'].round(1),
-            '位置賠率': race_detail_df['位置賠率'].round(1),
+            '基準賠率': race_detail_df['基準賠率'].round(1),
+            '買時/最新獨贏': race_detail_df['獨贏賠率'].round(1),
             '資金流向': race_detail_df['資金流向'],
-            '獨贏 EV': race_detail_df['win_ev'].round(2),
-            '位置 EV': race_detail_df['place_ev'].round(2),
-            '抗噪分': (race_detail_df['smart_score_win'] * 100).round(1),
-            '獨贏注碼': race_detail_df['suggested_stake_win'].apply(lambda x: f"${x:.0f}"),
-            '位置注碼': race_detail_df['suggested_stake_place'].apply(lambda x: f"${x:.0f}")
+            'EV (期望值)': race_detail_df['ev'].round(2),
+            '抗噪綜合分': (race_detail_df['smart_score'] * 100).round(1)
         })
         st.dataframe(display_detail, use_container_width=True, hide_index=True)
 
@@ -1616,236 +1232,194 @@ with tab1:
 
 # ---------------- 分頁 2: 賽後回測 ----------------
 with tab2:
-    st.subheader("📊 雙引擎多彩種策略回測總覽 (回測（官方派彩可用時優先，否則為估算）)")
-    st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}` ｜ 模型：`{engine_str}`")
-    if df_backtest.empty or not backtest_ready:
+    st.subheader("📊 多彩種策略回測總覽 (買時賠率選馬 vs 官方最終派彩)")
+    st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}`")
+    if not backtest_ready:
         st.warning("請在左側上傳已完賽的結果 CSV。需有『賽事編號』、『馬號』及『名次』。")
     else:
-        st.markdown('---')
-        st.info('為避免用同一批賽果挑參數造成嚴重過擬合，本頁已停用單日ROI尋優。參數只能在較早賽期選定，並以完全未參與選參數的較後賽期做時間外驗證。')
-        st.markdown('---')
-
         sub_tab1, sub_tab2, sub_tab3, sub_tab4, sub_tab5 = st.tabs([
-            "🥇 獨贏 (Win Engine)", "🥈 單匹位置 (Place Engine)", "🔗 位置Q (Place Engine)", "🥉 3匹位置包抄 (Place Engine)", "🛒 模擬結算 (Paper Trade)"
+            "🥇 獨贏 (Win)", "🥈 單匹位置 (Place)", "🔗 位置Q (QP)", "🥉 3匹位置包抄", "🛒 模擬結算 (Paper Trade)"
         ])
+        BET_AMOUNT = 100 
 
         with sub_tab1:
-            st.markdown("#### 🥇 獨贏 (Win) 策略回測 — 由 `my_hkjc_model.pkl` 驅動")
-            win_invested, win_return, win_bets, win_hits, win_missing_hit_payouts = 0, 0, 0, 0, 0
+            st.markdown("#### 🥇 獨贏 (Win) 策略回測")
+            win_invested, win_return, win_bets, win_hits = 0, 0, 0, 0
             win_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                if not race_can_be_settled(group):
-                    continue
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="win")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds)
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
-                    raw_stake = pick.get('suggested_stake_win', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
-                    
                     win_bets += 1
-                    win_invested += stake
+                    win_invested += BET_AMOUNT
                     is_hit = (pick['numeric_rank'] == 1)
                     settlement_win_odds = pick.get('回測獨贏賠率', np.nan)
                     if pd.isna(settlement_win_odds) or settlement_win_odds <= 1:
                         settlement_win_odds = pick['獨贏賠率']
-                        
-                    official_win_mult = official_dividend_multiplier(pick, 'WIN')
-                    payout_mult = official_win_mult if pd.notna(official_win_mult) else (float(settlement_win_odds) if pd.notna(settlement_win_odds) and float(settlement_win_odds) > 1 and not is_dead_heat(pick.get('名次', '')) else np.nan)
-                    payout = stake * payout_mult if is_hit and pd.notna(payout_mult) else 0
                     if is_hit:
                         win_hits += 1
-                        if pd.isna(payout_mult):
-                            win_missing_hit_payouts += 1
+                        payout = BET_AMOUNT * settlement_win_odds
                         win_return += payout
                         result_str = "✅ 贏"
                     else:
+                        payout = 0
                         result_str = "❌ 輸"
-                        
                     win_records.append({
                         '賽事編號': race_id,
-                        '賽道': pick.get('賽道', 'A'),
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
                         '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         '買時賠率 (選馬用)': round(pick['獨贏賠率'], 1),
-                        '派彩來源': '官方每HK$10派彩' if pd.notna(official_win_mult) else '以最終／買時賠率估算' if pd.notna(payout_mult) else '缺派彩資料',
-                        '最終賠率 (派彩用)': round(float(payout_mult), 2) if pd.notna(payout_mult) else '-',
+                        '最終賠率 (派彩用)': round(float(settlement_win_odds), 1),
                         'AI勝率': f"{pick['pred_win_prob']*100:.1f}%",
-                        '買時 獨贏EV': round(pick['win_ev'], 2),
-                        '凱利注碼': f"${stake:.0f}",
+                        '買時 EV': round(pick['ev'], 2),
                         '結果': result_str,
                         '派彩': f"${payout:.1f}",
-                        '淨盈虧': f"${payout - stake:.1f}"
+                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
                     })
             if win_bets > 0:
                 roi = ((win_return - win_invested) / win_invested) * 100
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("投注場數", f"{win_bets} 場")
                 col2.metric("命中場數", f"{win_hits} 場", f"勝率: {win_hits/win_bets*100:.1f}%")
-                col3.metric("總投入成本", f"${win_invested:,.0f}")
-                roi_label = f'ROI（官方派彩或賠率估算）: {roi:.2f}%' if win_missing_hit_payouts == 0 else f'不計ROI：{win_missing_hit_payouts}個命中缺派彩'
-                col4.metric("總回收派彩", f"${win_return:,.1f}", roi_label)
+                col3.metric("總成本", f"${win_invested}")
+                col4.metric("總回收", f"${win_return:.1f}", f"ROI: {roi:.2f}%")
                 st.markdown("##### 📝 獨贏明細 (對照買時賠率與最終派彩)")
                 st.dataframe(pd.DataFrame(win_records), use_container_width=True, hide_index=True)
             else:
                 st.info("💡 目前設定下沒有符合獨贏出手的場次。")
 
         with sub_tab2:
-            st.markdown("#### 🥈 位置 (Place) 策略回測 — 由 `my_hkjc_place_model.pkl` 驅動")
-            place_invested, place_return, place_bets, place_hits, place_missing_hit_payouts = 0, 0, 0, 0, 0
+            st.markdown("#### 🥈 位置 (Place) 策略回測")
+            place_invested, place_return, place_bets, place_hits = 0, 0, 0, 0
             place_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                if not race_can_be_settled(group):
-                    continue
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds)
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
-                    raw_stake = pick.get('suggested_stake_place', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
-                    
                     place_bets += 1
-                    place_invested += stake
-                    field_size = int((~group['_result_status'].eq('withdrawn')).sum())
-                    place_slots = place_slots_for_field(field_size)
-                    is_hit = is_place_hit(pick, field_size)
-                    official_mult = official_dividend_multiplier(pick, 'PLA')
-                    fallback_odds = pd.to_numeric(pick.get('回測位置賠率', np.nan), errors='coerce')
-                    if pd.isna(fallback_odds) or fallback_odds <= 1:
-                        fallback_odds = pd.to_numeric(pick.get('位置賠率', np.nan), errors='coerce')
-                    p_odds = official_mult if pd.notna(official_mult) else (float(fallback_odds) if pd.notna(fallback_odds) and fallback_odds > 1 and not is_dead_heat(pick.get('名次', '')) else np.nan)
-                    payout = stake * p_odds if is_hit and pd.notna(p_odds) else 0
+                    place_invested += BET_AMOUNT
+                    is_hit = (pick['numeric_rank'] <= 3)
+                    settlement_place_odds = pick.get('回測位置賠率', np.nan)
+                    if pd.isna(settlement_place_odds) or settlement_place_odds <= 1:
+                        settlement_place_odds = pick['位置賠率']
+                    p_odds = float(settlement_place_odds) if pd.notna(settlement_place_odds) and float(settlement_place_odds) > 1.0 else 1.5
                     if is_hit:
                         place_hits += 1
-                        if pd.isna(p_odds):
-                            place_missing_hit_payouts += 1
+                        payout = BET_AMOUNT * p_odds
                         place_return += payout
                         result_str = "✅ 命中位置"
                     else:
-                        result_str = f"❌ 未入前{place_slots}位"
-                        
+                        payout = 0
+                        result_str = "❌ 未入前三"
                     place_records.append({
                         '賽事編號': race_id,
-                        '賽道': pick.get('賽道', 'A'),
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
                         '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
-                        'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
-                        '買時 位置EV': round(pick['place_ev'], 2),
-                        '派彩賠率': round(p_odds, 2),
-                        '凱利注碼': f"${stake:.0f}",
-                        '得位席數': place_slots,
-                        '派彩來源': '官方每HK$10派彩' if pd.notna(official_mult) else '以位置賠率估算' if pd.notna(p_odds) else '缺派彩資料',
+                        '位置賠率': round(p_odds, 2),
+                        '買時 EV': round(pick['ev'], 2),
                         '結果': result_str,
                         '派彩': f"${payout:.1f}",
-                        '淨盈虧': f"${payout - stake:.1f}" if pd.notna(p_odds) else '不計（缺派彩）'
+                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
                     })
             if place_bets > 0:
                 roi = ((place_return - place_invested) / place_invested) * 100
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("投注場數", f"{place_bets} 場")
                 col2.metric("命中位置場數", f"{place_hits} 場", f"位置勝率: {place_hits/place_bets*100:.1f}%")
-                col3.metric("總投入成本", f"${place_invested:,.0f}")
-                roi_label = f'ROI（官方派彩或賠率估算）: {roi:.2f}%' if place_missing_hit_payouts == 0 else f'不計ROI：{place_missing_hit_payouts}個命中缺派彩'
-                col4.metric("總回收派彩", f"${place_return:,.1f}", roi_label)
+                col3.metric("總成本", f"${place_invested}")
+                col4.metric("總回收", f"${place_return:.1f}", f"ROI: {roi:.2f}%")
                 st.markdown("##### 📝 位置明細")
                 st.dataframe(pd.DataFrame(place_records), use_container_width=True, hide_index=True)
             else:
                 st.info("💡 目前設定下沒有符合位置出手的場次。")
 
         with sub_tab3:
-            st.markdown("#### 🔗 位置Q (QP) 策略回測 — 由 `my_hkjc_place_model.pkl` 驅動")
+            st.markdown("#### 🔗 位置Q (QP) 策略回測")
             qp_invested, qp_return, qp_bets, qp_hits = 0, 0, 0, 0
             qp_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                if not race_can_be_settled(group):
-                    continue
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds)
                 if len(sorted_group) >= 2:
                     top1 = sorted_group.iloc[0]
                     top2 = sorted_group.iloc[1]
-                    stake = max(10, min(float(top1.get('suggested_stake_place',10) if pd.notna(top1.get('suggested_stake_place')) else 10), float(top2.get('suggested_stake_place',10) if pd.notna(top2.get('suggested_stake_place')) else 10)))
-                    
                     qp_bets += 1
-                    qp_invested += stake
-                    field_size = int((~group['_result_status'].eq('withdrawn')).sum())
-                    is_hit = is_place_hit(top1, field_size) and is_place_hit(top2, field_size)
-                    # CSV不含指定馬匹組合的官方QP每HK$10派彩時，只報命中率，絕不估算ROI。
-                    payout = 0.0
+                    qp_invested += BET_AMOUNT
+                    is_hit = (top1['numeric_rank'] <= 3) and (top2['numeric_rank'] <= 3)
+                    p1_settlement = top1.get('回測位置賠率', np.nan)
+                    p2_settlement = top2.get('回測位置賠率', np.nan)
+                    p1_odds = float(p1_settlement if pd.notna(p1_settlement) and p1_settlement > 1.0 else top1['位置賠率'])
+                    p2_odds = float(p2_settlement if pd.notna(p2_settlement) and p2_settlement > 1.0 else top2['位置賠率'])
+                    estimated_qp_odds = round(p1_odds * p2_odds * 1.8, 1) 
                     if is_hit:
                         qp_hits += 1
-                        result_str = "✅ 命中位置Q（派彩未提供）"
+                        payout = BET_AMOUNT * estimated_qp_odds
+                        qp_return += payout
+                        result_str = "✅ 命中位置Q"
                     else:
+                        payout = 0
                         result_str = "❌ 落空"
-                        
                     qp_records.append({
                         '賽事編號': race_id,
                         'QP 組合': f"{top1['馬號']} + {top2['馬號']} ({top1['馬名']} / {top2['馬名']})",
-                        'AI入位率': f"{top1['pred_place_prob']*100:.0f}% / {top2['pred_place_prob']*100:.0f}%",
                         '實際名次': f"首選:第{str(top1['名次']).replace('.0','')}名 | 次選:第{str(top2['名次']).replace('.0','')}名",
-                        '官方QP派彩': '未提供',
-                        '凱利注碼': f"${stake:.0f}",
+                        '估算QP賠率': estimated_qp_odds,
                         '結果': result_str,
-                        '派彩': '不計（缺官方QP派彩）',
-                        '淨盈虧': '不計（缺官方QP派彩）'
+                        '派彩': f"${payout:.1f}",
+                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
                     })
             if qp_bets > 0:
-                col1, col2 = st.columns(2)
+                roi = ((qp_return - qp_invested) / qp_invested) * 100
+                col1, col2, col3, col4 = st.columns(4)
                 col1.metric("投注場數", f"{qp_bets} 場")
                 col2.metric("命中 QP 場數", f"{qp_hits} 場", f"QP 命中率: {qp_hits/qp_bets*100:.1f}%")
-                st.info('上傳CSV沒有指定馬匹組合的官方QP派彩，因此只顯示命中率；不使用位置派彩乘數猜QP ROI。')
+                col3.metric("總成本", f"${qp_invested}")
+                col4.metric("總回收", f"${qp_return:.1f}", f"ROI: {roi:.2f}%")
                 st.markdown("##### 📝 位置Q (QP) 明細")
                 st.dataframe(pd.DataFrame(qp_records), use_container_width=True, hide_index=True)
             else:
                 st.info("💡 目前設定下沒有符合位置 Q 出手的場次。")
 
         with sub_tab4:
-            st.markdown("#### 🥉 3匹位置包抄 (3x Place) 策略回測 — 由 `my_hkjc_place_model.pkl` 驅動")
-            st.caption("策略邏輯：每場買入位置模型推薦最高分的 3 匹馬位置。")
-            p3_invested, p3_return, p3_bets, p3_hits, p3_missing_hit_payouts = 0, 0, 0, 0, 0
+            st.markdown("#### 🥉 3匹位置包抄 (3x Place) 策略回測")
+            st.caption("策略邏輯：每場買入 AI 推薦最高分的 3 匹馬位置（每匹各一注）。")
+            p3_invested, p3_return, p3_bets, p3_hits = 0, 0, 0, 0
             p3_records = []
             
             for race_id, group in df_backtest.groupby('賽事編號'):
-                if not race_can_be_settled(group):
-                    continue
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds)
                 picks = sorted_group.head(3)
                 
                 for _, pick in picks.iterrows():
-                    raw_stake = pick.get('suggested_stake_place', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
-                    
                     p3_bets += 1
-                    p3_invested += stake
-                    field_size = int((~group['_result_status'].eq('withdrawn')).sum())
-                    place_slots = place_slots_for_field(field_size)
-                    is_hit = is_place_hit(pick, field_size)
-                    official_mult = official_dividend_multiplier(pick, 'PLA')
-                    fallback_odds = pd.to_numeric(pick.get('回測位置賠率', np.nan), errors='coerce')
-                    if pd.isna(fallback_odds) or fallback_odds <= 1:
-                        fallback_odds = pd.to_numeric(pick.get('位置賠率', np.nan), errors='coerce')
-                    p_odds = official_mult if pd.notna(official_mult) else (float(fallback_odds) if pd.notna(fallback_odds) and fallback_odds > 1 and not is_dead_heat(pick.get('名次', '')) else np.nan)
-                    payout = stake * p_odds if is_hit and pd.notna(p_odds) else 0
+                    p3_invested += BET_AMOUNT
+                    is_hit = (pick['numeric_rank'] <= 3)
+                    
+                    settlement_place_odds = pick.get('回測位置賠率', np.nan)
+                    if pd.isna(settlement_place_odds) or settlement_place_odds <= 1:
+                        settlement_place_odds = pick['位置賠率']
+                    p_odds = float(settlement_place_odds) if pd.notna(settlement_place_odds) and float(settlement_place_odds) > 1.0 else 1.5
+                    
                     if is_hit:
                         p3_hits += 1
-                        if pd.isna(p_odds):
-                            p3_missing_hit_payouts += 1
+                        payout = BET_AMOUNT * p_odds
                         p3_return += payout
                         result_str = "✅ 命中位置"
                     else:
-                        result_str = f"❌ 未入前{place_slots}位"
+                        payout = 0
+                        result_str = "❌ 未入前三"
                         
                     p3_records.append({
                         '賽事編號': race_id,
                         '投注馬號': f"{pick['馬號']} ({pick['馬名']})",
                         '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
-                        'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
-                        '派彩賠率': round(p_odds, 2),
-                        '買時 位置EV': round(pick['place_ev'], 2),
-                        '凱利注碼': f"${stake:.0f}",
+                        '位置賠率': round(p_odds, 2),
+                        '買時 EV': round(pick['ev'], 2),
                         '結果': result_str,
                         '派彩': f"${payout:.1f}",
-                        '淨盈虧': f"${payout - stake:.1f}"
+                        '淨盈虧': f"${payout - BET_AMOUNT:.1f}"
                     })
                     
             if p3_bets > 0:
@@ -1853,24 +1427,23 @@ with tab2:
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("總投注注數", f"{p3_bets} 注")
                 col2.metric("命中注數", f"{p3_hits} 注", f"命中率: {p3_hits/p3_bets*100:.1f}%")
-                col3.metric("總投入成本", f"${p3_invested:,.0f}")
-                roi_label = f'ROI（官方派彩或賠率估算）: {roi:.2f}%' if p3_missing_hit_payouts == 0 else f'不計ROI：{p3_missing_hit_payouts}個命中缺派彩'
-                col4.metric("總回收派彩", f"${p3_return:,.1f}", roi_label)
+                col3.metric("總成本", f"${p3_invested}")
+                col4.metric("總回收", f"${p3_return:.1f}", f"ROI: {roi:.2f}%")
                 st.markdown("##### 📝 3匹位置包抄明細")
                 st.dataframe(pd.DataFrame(p3_records), use_container_width=True, hide_index=True)
             else:
                 st.info("💡 目前設定下沒有符合出手的場次。")
 
         with sub_tab5:
-            st.markdown("#### 🛒 模擬投注結算 (Paper Trading PnL)")
-            st.caption("系統會將你的虛擬注單與官方賽果比對，並優先使用官方最終派彩賠率（若無則用買入賠率）計算估算盈虧；CSV如含明確官方每HK$10派彩欄則優先使用。")
+            st.markdown("#### 🛒 模擬投注真實結算 (Paper Trading PnL)")
+            st.caption("系統會將你的虛擬注單與官方賽果比對，並優先使用官方最終派彩賠率（若無則用買入賠率）計算真實盈虧。")
             
             if 'simulated_bets' not in st.session_state or st.session_state['simulated_bets'].empty:
                 st.info("💡 目前沒有任何模擬投注紀錄。請先在「賽前預測」分頁進行模擬下注。")
             else:
                 sim_df = st.session_state['simulated_bets'].copy()
                 sim_results = []
-                sim_invested, sim_return, sim_hits, sim_settled_bets = 0, 0, 0, 0
+                sim_invested, sim_return, sim_hits = 0, 0, 0
                 sim_bets = len(sim_df)
 
                 for idx, bet in sim_df.iterrows():
@@ -1880,22 +1453,11 @@ with tab2:
                     locked_odds = float(bet['買入賠率'])
                     stake = float(bet['注碼'])
 
-                    race_rows = df_backtest[df_backtest['_race_key'] == normalize_race_id(race_id)]
-                    match = race_rows[race_rows['_horse_key'] == normalize_horse_no(horse_no)]
+                    sim_invested += stake
 
-                    if not race_rows.empty and race_rows['_race_cancelled'].any():
-                        sim_settled_bets += 1
-                        sim_invested += stake
-                        sim_return += stake
-                        sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': '取消', '結果': '取消賽事—退款', '派彩': f"${stake:.1f}", '淨盈虧': '$0.0'})
-                        continue
-                    if not match.empty and match['_predicted_withdrawn'].iloc[0]:
-                        sim_settled_bets += 1
-                        sim_invested += stake
-                        sim_return += stake
-                        sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': '退出', '結果': '退出—退款', '派彩': f"${stake:.1f}", '淨盈虧': '$0.0'})
-                        continue
-                    if match.empty or match['_result_status'].iloc[0] == 'unmatched':
+                    match = df_backtest[(df_backtest['賽事編號'] == race_id) & (df_backtest['馬號'].astype(str) == horse_no)]
+
+                    if match.empty or pd.isna(match['numeric_rank'].values[0]) or match['numeric_rank'].values[0] == 99:
                         sim_results.append({
                             '下注時間': bet['下注時間'],
                             '場次': bet['場次'],
@@ -1904,28 +1466,11 @@ with tab2:
                             '注碼': f"${stake:.0f}",
                             '買入時賠率': locked_odds,
                             '實際名次': '-',
-                            '結果': '⚠️ 未配對官方賽果（不計ROI）',
+                            '結果': '⏳ 待開彩',
                             '派彩': '$0.0',
                             '淨盈虧': '$0.0'
                         })
-                    elif match['_race_cancelled'].iloc[0] or match['_result_status'].iloc[0] == 'cancelled':
-                        sim_settled_bets += 1
-                        sim_invested += stake
-                        sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': '取消', '結果': '取消賽事—退款', '派彩': f"${stake:.1f}", '淨盈虧': '$0.0'})
-                        sim_return += stake
-                        continue
-                    elif match['_result_status'].iloc[0] == 'withdrawn':
-                        sim_settled_bets += 1
-                        sim_invested += stake
-                        sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': '退出', '結果': '退出—退款', '派彩': f"${stake:.1f}", '淨盈虧': '$0.0'})
-                        sim_return += stake
-                        continue
-                    elif match['_result_status'].iloc[0] == 'non_numeric_result':
-                        sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': str(match['名次'].iloc[0]), '結果': '官方非數字賽果—待核實，不計ROI', '派彩': '不計', '淨盈虧': '不計'})
-                        continue
                     else:
-                        sim_settled_bets += 1
-                        sim_invested += stake
                         actual_rank = match['numeric_rank'].values[0]
                         rank_str = str(match['名次'].values[0]).replace('.0', '')
 
@@ -1934,7 +1479,7 @@ with tab2:
                             is_hit = True
                             sp_odds = match.get('回測獨贏賠率', pd.Series([np.nan])).values[0]
                             final_odds = float(sp_odds) if pd.notna(sp_odds) and float(sp_odds) > 1.0 else locked_odds
-                        elif bet_type == "PLA" and is_place_hit(match.iloc[0], int((~df_backtest[df_backtest['_race_key'] == normalize_race_id(race_id)]['_result_status'].eq('withdrawn')).sum())):
+                        elif bet_type == "PLA" and actual_rank <= 3:
                             is_hit = True
                             sp_odds = match.get('回測位置賠率', pd.Series([np.nan])).values[0]
                             final_odds = float(sp_odds) if pd.notna(sp_odds) and float(sp_odds) > 1.0 else locked_odds
@@ -1943,13 +1488,7 @@ with tab2:
 
                         if is_hit:
                             sim_hits += 1
-                            official_sim_mult = official_dividend_multiplier(match.iloc[0], bet_type)
-                            payout = stake * official_sim_mult if pd.notna(official_sim_mult) else (stake * final_odds if not is_dead_heat(match['名次'].iloc[0]) else 0)
-                            if pd.isna(official_sim_mult) and is_dead_heat(match['名次'].iloc[0]):
-                                sim_invested -= stake
-                                sim_settled_bets -= 1
-                                sim_results.append({'下注時間': bet['下注時間'], '場次': bet['場次'], '馬匹': f"{horse_no} ({bet['馬名']})", '玩法': bet_type, '注碼': f"${stake:.0f}", '買入時賠率': locked_odds, '實際名次': rank_str, '結果': '平頭但CSV缺官方派彩—不計ROI', '派彩': '不計', '淨盈虧': '不計'})
-                                continue
+                            payout = stake * final_odds
                             sim_return += payout
                             result_text = "✅ 贏"
                         else:
@@ -1963,7 +1502,6 @@ with tab2:
                             '玩法': bet_type,
                             '注碼': f"${stake:.0f}",
                             '買入時賠率': locked_odds,
-                            '派彩來源': '官方每HK$10派彩' if is_hit and pd.notna(official_sim_mult) else '估算賠率' if is_hit else '未中',
                             '最終派彩賠率': round(final_odds, 1),
                             '實際名次': f"第 {rank_str} 名",
                             '結果': result_text,
@@ -1971,13 +1509,13 @@ with tab2:
                             '淨盈虧': f"${payout - stake:.1f}"
                         })
 
-                if sim_bets > 0:
-                    roi = ((sim_return - sim_invested) / sim_invested) * 100 if sim_invested > 0 else np.nan
+                if sim_invested > 0:
+                    roi = ((sim_return - sim_invested) / sim_invested) * 100
                     col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("已結算注數", f"{sim_settled_bets} 注（另有 {sim_bets-sim_settled_bets} 注未配對）")
-                    col2.metric("命中注數", f"{sim_hits} 注", f"命中率: {sim_hits/sim_settled_bets*100:.1f}%" if sim_settled_bets else '無已結算注單')
+                    col1.metric("模擬總注數", f"{sim_bets} 注")
+                    col2.metric("命中注數", f"{sim_hits} 注", f"命中率: {sim_hits/sim_bets*100:.1f}%")
                     col3.metric("總投入資金", f"${sim_invested:,.1f}")
-                    col4.metric("總回收派彩", f"${sim_return:,.1f}", f"ROI（官方派彩或賠率估算）: {roi:.2f}%" if np.isfinite(roi) else 'ROI暫不計（沒有已結算注單）')
+                    col4.metric("總回收派彩", f"${sim_return:,.1f}", f"真實 ROI: {roi:.2f}%")
 
                     st.markdown("##### 🧾 模擬投注詳細結算單")
                     st.dataframe(pd.DataFrame(sim_results), use_container_width=True, hide_index=True)
