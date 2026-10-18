@@ -64,28 +64,28 @@ if model_place is not None:
 else:
     st.sidebar.warning("⚠️ 找不到 `my_hkjc_place_model.pkl`，位置彩池將暫用獨贏模型代算。")
 
-@st.cache_data(show_spinner=False)
-def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv', cutoff_date=None, file_signature=None):
-    """只用 cutoff_date 之前的已完成賽事計算歷史統計；目標日和未來日期一律排除。"""
+@st.cache_data
+def load_historical_stats(cutoff_date_str="99999999", history_csv_path='hkjc_all_seasons_features.csv'):
     csv_path = Path(__file__).resolve().parent / history_csv_path
-    if not csv_path.is_file() or not cutoff_date:
+    if not os.path.exists(csv_path):
         return None
+    
     try:
         try:
             hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
         except UnicodeDecodeError:
             hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
-        required = {'賽事編號', '名次', '騎師', '練馬師', '馬名'}
-        if not required.issubset(hist_df.columns):
-            return None
-        date_text = hist_df['賽事編號'].astype(str).str.extract(r'(20\d{6})', expand=False)
-        hist_df['_race_date'] = pd.to_datetime(date_text, format='%Y%m%d', errors='coerce')
-        cutoff = pd.to_datetime(cutoff_date).normalize()
-        # 無法解析日期的列不允許進入統計，避免日期不明的未來賽果洩漏。
-        hist_df = hist_df[hist_df['_race_date'].notna() & (hist_df['_race_date'] < cutoff)].copy()
+            
+        # 🔥 【加在這裡】時間防火牆：只保留「當前賽卡日期之前」的歷史紀錄！
+        if '賽事編號' in hist_df.columns and cutoff_date_str != "99999999":
+            hist_df['_date_str'] = hist_df['賽事編號'].astype(str).str.extract(r'(20\d{6})')[0].fillna('00000000')
+            hist_df = hist_df[hist_df['_date_str'] < cutoff_date_str].copy()
+            
         if hist_df.empty:
             return None
+
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
+        # ... (下面的程式碼全部保持原本的不用動！)
         hist_df = hist_df[hist_df['numeric_rank'].notna()].copy()
         if hist_df.empty:
             return None
@@ -1141,9 +1141,15 @@ df['kelly_pct_place'] = np.clip((df['place_ev'] - 1.0) / (safe_place_odds - 1.0)
 df['suggested_stake_place'] = np.floor((total_bankroll * df['kelly_pct_place'] * kelly_fraction) / 10) * 10
 
 # 🚀 核心雙軌過濾與排序邏輯 (支援 bet_type 分流)
+# 🚀 核心雙軌過濾與排序邏輯 (加入 18% 獨贏與 40% 位置實力底線保護傘)
 def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val, bet_type="win"):
     if bet_type == "win":
-        cond = group['pred_win_prob'].notna() & group['獨贏賠率'].gt(1.0) & group['win_ev'].ge(min_ev_val) & group['獨贏賠率'].ge(min_odds_val) & group['獨贏賠率'].le(max_odds_val) & ~group['_is_withdrawn']
+        cond = (
+            (group['win_ev'] >= min_ev_val) & 
+            (group['獨贏賠率'] >= min_odds_val) & 
+            (group['獨贏賠率'] <= max_odds_val) &
+            (group['pred_win_prob'] >= 0.18)  # 🔥 實力底線：AI 獨贏勝率至少要 18%
+        )
         if mode.startswith("🛡️"):
             cond = cond & (group['odds_drop_pct'] > -25.0)
             sort_col = 'smart_score_win'
@@ -1152,9 +1158,12 @@ def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val, b
         else:
             sort_col = 'win_ev'
     else:
-        # 位置賠率較低，將獨贏最低賠率門檻除以 3 作為位置賠率下限
         min_pla_odds = max(1.01, min_odds_val / 3.0)
-        cond = group['pred_place_prob'].notna() & group['位置賠率'].gt(1.0) & group['place_ev'].ge(min_ev_val) & group['位置賠率'].ge(min_pla_odds) & ~group['_is_withdrawn']
+        cond = (
+            (group['place_ev'] >= min_ev_val) & 
+            (group['位置賠率'] >= min_pla_odds) &
+            (group['pred_place_prob'] >= 0.40) # 🔥 實力底線：AI 位置入位率至少要 40%
+        )
         if mode.startswith("🛡️"):
             cond = cond & (group['odds_drop_pct'] > -25.0)
             sort_col = 'smart_score_place'
