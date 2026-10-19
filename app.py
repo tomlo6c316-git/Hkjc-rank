@@ -747,9 +747,9 @@ if fetched_prediction_df is not None and st.session_state.pop('pending_auto_odds
             place_price = race_market.get('PLA', {}).get(horse_no)
             if win_price is not None and win_price > 0:
                 df_raw.at[idx, '獨贏賠率'] = win_price
+                # 🔥 強制使用獨贏賠率推算位置賠率，完全不看官方 place_price
+                df_raw.at[idx, '位置賠率'] = 1.0 + (win_price - 1.0) / 3.2
                 win_count += 1
-            if place_price is not None and place_price > 0:
-                df_raw.at[idx, '位置賠率'] = place_price
                 place_count += 1
         st.session_state['df_data'] = df_raw.copy()
         st.session_state['fetched_prediction_df'] = df_raw.copy()
@@ -774,9 +774,21 @@ if auto_odds_status:
 # 確保賠率、賽道與跑法欄位存在
 if '獨贏賠率' not in df_raw.columns:
     df_raw['獨贏賠率'] = 10.0
+else:
+    df_raw['獨贏賠率'] = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
+
+win_values = df_raw['獨贏賠率']
 if '位置賠率' not in df_raw.columns:
-    win_values = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
     df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
+else:
+    # 先將內容轉為數字
+    df_raw['位置賠率'] = pd.to_numeric(df_raw['位置賠率'], errors='coerce')
+    # 🔥 關鍵新增：判斷是否「整欄全部都是 1.5」(這代表是系統爬蟲產生的預設假資料)
+    if (df_raw['位置賠率'] == 1.5).all():
+        df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
+    else:
+        # 如果不是整欄 1.5，代表可能有真實賠率，只把裡面的空值 (NaN) 用公式補算
+        df_raw['位置賠率'] = df_raw['位置賠率'].fillna(1.0 + (win_values - 1.0) / 3.2)
 if '賽道' not in df_raw.columns:
     df_raw['賽道'] = 'A'
 if '跑法' not in df_raw.columns:
@@ -827,7 +839,7 @@ edited_df = st.data_editor(
 
 # 同步手動修改的賠率與跑法回 session_state['df_data']
 st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
-st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.5)
+st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.0 + (st.session_state['df_data']['獨贏賠率'] - 1.0) / 3.2)
 st.session_state['df_data']['跑法'] = edited_df['跑法']
 
 df = st.session_state['df_data'].copy()
@@ -1222,9 +1234,10 @@ with tab1:
                 for horse_no, value in markets['WIN'].items():
                     horse_mask = race_mask & (row_horses == horse_no)
                     df_temp.loc[horse_mask, '獨贏賠率'] = value
-                for horse_no, value in markets['PLA'].items():
-                    horse_mask = race_mask & (row_horses == horse_no)
-                    df_temp.loc[horse_mask, '位置賠率'] = value
+                    # 🔥 強制使用最新的獨贏賠率，連動推算位置賠率
+                    df_temp.loc[horse_mask, '位置賠率'] = 1.0 + (value - 1.0) / 3.2
+                    
+                # (原本抓取官方 PLA 的迴圈已被徹底刪除)
 
             if st.session_state.get('baseline_locked_time') == "初始載入值":
                 base_map = {}
