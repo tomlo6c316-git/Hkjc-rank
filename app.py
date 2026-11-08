@@ -1385,7 +1385,7 @@ with tab1:
 
     st.markdown("---")
     st.subheader("🏇 場次總覽")
-    st.caption("每場均列出首選；盤口缺價或沒有符合篩選條件時會明確標示，不會把該場隱藏。選擇上方場次即可查看單場速覽。")
+    st.caption("連贏Q候選按現行WIN排序前二；位置Q/QP主選與備選按現行PLACE排序前二／第一加第三。這些是候選組合，不代表已計算彩池派彩或保證命中。選場後可查看單場詳情。")
 
     recommendations = []
     recommendation_rows_by_race = {}
@@ -1396,22 +1396,13 @@ with tab1:
         sorted_place = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
         recommendation_rows_by_race[int(r_no)] = (race_id, sorted_win, sorted_place)
 
-        if len(sorted_win):
-            win_row = sorted_win.iloc[0]
-            win_name = f"{win_row['馬號']} {win_row['馬名']}"
-            win_prob = f"{win_row['pred_win_prob']:.1%}"
-            win_price = pd.to_numeric(win_row.get('獨贏賠率'), errors='coerce')
-            win_odds_text = f"{win_price:.1f}" if pd.notna(win_price) and win_price > 1 else "—"
+        q_pair = f"{sorted_win.iloc[0]['馬號']}–{sorted_win.iloc[1]['馬號']}" if len(sorted_win) >= 2 else ("候選不足兩匹" if len(sorted_win) == 1 else "未有合格候選")
+        if len(sorted_place) >= 2:
+            qp_main = f"{sorted_place.iloc[0]['馬號']}–{sorted_place.iloc[1]['馬號']}"
+            qp_alt = f"{sorted_place.iloc[0]['馬號']}–{sorted_place.iloc[2]['馬號']}" if len(sorted_place) >= 3 else "—"
         else:
-            win_name, win_prob, win_odds_text = "—", "—", "—"
-        if len(sorted_place):
-            place_row = sorted_place.iloc[0]
-            place_name = f"{place_row['馬號']} {place_row['馬名']}"
-            place_prob = f"{place_row['pred_place_prob']:.1%}"
-            place_price = pd.to_numeric(place_row.get('位置賠率'), errors='coerce')
-            place_odds_text = f"{place_price:.1f}" if pd.notna(place_price) and place_price > 1 else "—"
-        else:
-            place_name, place_prob, place_odds_text = "—", "—", "—"
+            qp_main = "候選不足兩匹" if len(sorted_place) == 1 else "未有合格候選"
+            qp_alt = "—"
         active_rows = group
         win_available = pd.to_numeric(active_rows['獨贏賠率'], errors='coerce').gt(1).sum()
         place_available = pd.to_numeric(active_rows['位置賠率'], errors='coerce').gt(1).sum()
@@ -1419,11 +1410,11 @@ with tab1:
         signal_status = "WIN/PLACE完整" if complete else f"WIN {win_available}/{len(active_rows)} · PLA {place_available}/{len(active_rows)}"
         recommendations.append({
             '場次': f"第 {int(r_no)} 場",
-            '盤口': freeze_badge,
-            'WIN首選（勝率）': f"{win_name}（{win_prob}）" if win_name != '—' else '—',
-            '位置首選（入位率）': f"{place_name}（{place_prob}）" if place_name != '—' else '—',
-            'WIN/PLACE賠率': f"{win_odds_text} / {place_odds_text}",
+            '連贏 Q 候選（WIN排序前二）': q_pair,
+            '位置Q/QP主選（PLACE前二）': qp_main,
+            '位置Q/QP備選（第一＋第三）': qp_alt,
             '盤口狀態': signal_status,
+            '盤口鎖定': freeze_badge,
         })
 
     rec_df = pd.DataFrame(recommendations)
@@ -1462,13 +1453,18 @@ with tab1:
             
         race_detail_df = race_detail_df.sort_values(by=sort_col_detail, ascending=False, kind='stable')
         win_pick_indices = set()
-        place_pick_indices = set()
+        q_pick_indices = set()
+        qp_main_indices = set()
+        qp_alt_indices = set()
         # 綁定當前選中場次的排序結果；只有顯示標記，不改推薦／模型計算。
         selected_recs = recommendation_rows_by_race.get(int(target_race))
         if selected_recs:
             _, selected_sorted_win, selected_sorted_place = selected_recs
             win_pick_indices = set(selected_sorted_win.head(1).index)
-            place_pick_indices = set(selected_sorted_place.head(3).index)
+            q_pick_indices = set(selected_sorted_win.head(2).index)
+            qp_main_indices = set(selected_sorted_place.head(2).index)
+            if len(selected_sorted_place) >= 3:
+                qp_alt_indices = {selected_sorted_place.index[0], selected_sorted_place.index[2]}
         display_detail = pd.DataFrame({
             '馬號': race_detail_df['馬號'].astype(str),
             '馬名': race_detail_df['馬名'],
@@ -1483,10 +1479,13 @@ with tab1:
                 lambda r: (f"{float(r['odds_drop_pct']):+.0f}%" if pd.notna(pd.to_numeric(r['獨贏賠率'], errors='coerce')) and float(r['獨贏賠率']) > 1 and pd.notna(pd.to_numeric(r['基準賠率'], errors='coerce')) and float(r['基準賠率']) > 1 else '—'), axis=1
             ),
             'EV W/P': race_detail_df.apply(lambda r: f"{r['win_ev']:.2f} / {r['place_ev']:.2f}" if pd.notna(r['win_ev']) and pd.notna(r['place_ev']) else '—', axis=1),
-            '建議': [
-                ('WIN首選 · 位置候選' if idx in win_pick_indices and idx in place_pick_indices else
-                 'WIN首選' if idx in win_pick_indices else
-                 '位置候選' if idx in place_pick_indices else '—')
+            '組合角色': [
+                ' · '.join(label for condition, label in [
+                    (idx in win_pick_indices, 'WIN首選'),
+                    (idx in q_pick_indices, '連贏Q'),
+                    (idx in qp_main_indices, '位置Q/QP主選'),
+                    (idx in qp_alt_indices, '位置Q/QP備選'),
+                ] if condition) or '—'
                 for idx in race_detail_df.index
             ],
         })
