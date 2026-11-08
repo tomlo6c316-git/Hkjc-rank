@@ -152,6 +152,9 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv', as_o
         recent_trainer_stats = recent_t_df.groupby('_clean_trainer', as_index=False)['is_win'].mean().rename(columns={'is_win': 'recent_trainer_win_rate'})
         trainer_stats = trainer_stats.merge(recent_trainer_stats, on='_clean_trainer', how='left')
         horse_last_rank_stats = valid_ranks_df.groupby('_clean_horse', as_index=False).last()[['_clean_horse', 'numeric_rank']].rename(columns={'numeric_rank': 'hist_horse_last_rank'})
+        horse_last_rank_stats['hist_horse_last_rank'] = pd.to_numeric(
+            horse_last_rank_stats['hist_horse_last_rank'], errors='coerce'
+        ).astype('float64')
 
         if '場地' in hist_df.columns:
             hist_df['_clean_surface'] = clean_name(hist_df['場地'])
@@ -978,7 +981,9 @@ if hist_stats is not None:
     df['combo_win_rate'] = df['hist_combo_win_rate'].fillna(0.05)
     
     # 儲存真實近況與路程數據供畫面表格顯示 (不受算分開關影響)
-    df['real_last_rank'] = df['hist_horse_last_rank'].fillna(6.5)
+    df['real_last_rank'] = pd.to_numeric(
+        df['hist_horse_last_rank'], errors='coerce'
+    ).astype('float64').fillna(6.5)
     df['real_surface_win_rate'] = df['hist_horse_surface_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
     df['real_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
     
