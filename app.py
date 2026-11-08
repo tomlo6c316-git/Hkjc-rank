@@ -82,8 +82,12 @@ else:
     st.sidebar.caption(f"預期 PLACE 模型路徑：`{PLACE_MODEL_PATH}`")
 
 def _race_date_from_id(value):
-    match = re.search(r"(20\d{6})", str(value))
-    return pd.to_datetime(match.group(1), format="%Y%m%d", errors="coerce") if match else pd.NaT
+    text = str(value)
+    match = re.search(r"(20\d{2})[-/]?(\d{2})[-/]?(\d{2})", text)
+    if not match:
+        return pd.NaT
+    date_text = ''.join(match.groups())
+    return pd.to_datetime(date_text, format="%Y%m%d", errors="coerce")
 
 
 @st.cache_data
@@ -119,7 +123,9 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv', as_o
         hist_df = hist_df.loc[(hist_df['numeric_rank'].notna() | disqualified) & ~nonstarter].copy()
         if hist_df.empty:
             return None
-        hist_df['is_win'] = hist_df['numeric_rank'].eq(1).astype(int)
+        # Disqualified rows are retained as non-wins, but nullable Int64.eq()
+        # yields <NA> for them; fill explicitly before converting to integer.
+        hist_df['is_win'] = hist_df['numeric_rank'].eq(1).fillna(False).astype('int8')
 
         def clean_name(series, strip_annotation=False):
             values = series.astype('string').fillna('').str.strip()
